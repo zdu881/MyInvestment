@@ -1,0 +1,11 @@
+﻿股票代码,名称,现价,PE(TTM),PB,股息率(%),一手成本,数据源,命中条件数,命中_市值,命中_PE,命中_PB,命中_一手成本,命中_股息率
+600023,浙能电力,5.01,9.22,0.9,0.07,501.0,lixinger,4,True,True,True,True,False
+601668,中国建筑,5.0,4.66,0.43,0.05,500.49,lixinger,4,True,True,True,True,False
+601390,中国中铁,5.62,5.6,0.44,0.05,561.73,lixinger,4,True,True,True,True,False
+600820,隧道股份,6.57,8.1,0.67,0.05,657.0,lixinger,4,True,True,True,True,False
+601186,中国铁建,7.24,4.61,0.36,0.04,724.0,lixinger,4,True,True,True,True,False
+600483,福能股份,9.25,8.55,0.98,0.04,925.0,lixinger,4,True,True,True,True,False
+601800,中国交建,8.07,6.33,0.45,0.03,806.8,lixinger,4,True,True,True,True,False
+601117,中国化学,8.53,8.56,0.8,0.03,852.66,lixinger,4,True,True,True,True,False
+601669,中国电建,5.53,8.92,0.66,0.02,553.0,lixinger,4,True,True,True,True,False
+002608,江苏国信,7.82,8.33,0.85,0.01,782.0,lixinger,4,True,True,True,True,False
