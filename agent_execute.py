@@ -46,6 +46,20 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
 def load_json(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
@@ -279,6 +293,63 @@ def format_pct(value: float) -> str:
     return f"{value:.2%}"
 
 
+def load_constraints(account: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, float]:
+    cfg_constraints = cfg.get("constraints", {}) if isinstance(cfg, dict) else {}
+    return {
+        "max_single_weight": safe_float(
+            account.get("max_single_weight"), safe_float(cfg_constraints.get("max_single_weight"), 0.3)
+        ),
+        "max_industry_weight": safe_float(
+            account.get("max_industry_weight"), safe_float(cfg_constraints.get("max_industry_weight"), 0.5)
+        ),
+        "min_cash_ratio": safe_float(
+            account.get("min_cash_ratio"), safe_float(cfg_constraints.get("min_cash_ratio"), 0.1)
+        ),
+    }
+
+
+def validate_post_execution_constraints(
+    positions_df: pd.DataFrame,
+    cash_ratio: float,
+    constraints: Dict[str, float],
+    tolerance: float = 0.001,
+) -> Dict[str, Any]:
+    max_single_limit = safe_float(constraints.get("max_single_weight"), 0.3)
+    max_industry_limit = safe_float(constraints.get("max_industry_weight"), 0.5)
+    min_cash_limit = safe_float(constraints.get("min_cash_ratio"), 0.1)
+
+    top1_weight = 0.0
+    max_industry_weight = 0.0
+    if not positions_df.empty:
+        top1_weight = safe_float(positions_df["weight"].max(), 0.0)
+        ind_exp = industry_exposure(positions_df)
+        max_industry_weight = max(ind_exp.values()) if ind_exp else 0.0
+
+    violations: List[str] = []
+    if top1_weight > max_single_limit + tolerance:
+        violations.append(
+            f"single_weight_exceeded:{top1_weight:.4f}>{max_single_limit:.4f}"
+        )
+    if max_industry_weight > max_industry_limit + tolerance:
+        violations.append(
+            f"industry_weight_exceeded:{max_industry_weight:.4f}>{max_industry_limit:.4f}"
+        )
+    if cash_ratio < min_cash_limit - tolerance:
+        violations.append(f"cash_ratio_below_min:{cash_ratio:.4f}<{min_cash_limit:.4f}")
+
+    return {
+        "max_single_weight_limit": max_single_limit,
+        "max_industry_weight_limit": max_industry_limit,
+        "min_cash_ratio_limit": min_cash_limit,
+        "tolerance": tolerance,
+        "post_top1_weight": round(top1_weight, 8),
+        "post_max_industry_weight": round(max_industry_weight, 8),
+        "post_cash_ratio": round(cash_ratio, 8),
+        "violations": violations,
+        "compliant": len(violations) == 0,
+    }
+
+
 def generate_portfolio_change_report(
     run_dir: Path,
     run_id: str,
@@ -292,6 +363,7 @@ def generate_portfolio_change_report(
     after_cash_ratio: float,
     warnings: List[str],
     execution_costs: Dict[str, Any],
+    constraint_validation: Dict[str, Any],
 ) -> Path:
     before_map = {
         normalize_ticker(r["ticker"]): safe_float(r.get("weight"), 0.0)
@@ -439,6 +511,26 @@ def generate_portfolio_change_report(
     lines.append(
         f"- total_execution_cost: {safe_float(execution_costs.get('total_execution_cost'), 0.0):.2f} ({format_pct(safe_float(execution_costs.get('cost_ratio_total_asset'), 0.0))})"
     )
+    lines.append("")
+
+    lines.append("## Constraint Validation")
+    lines.append("")
+    lines.append(
+        f"- max_single_weight: {format_pct(safe_float(constraint_validation.get('post_top1_weight'), 0.0))} / limit {format_pct(safe_float(constraint_validation.get('max_single_weight_limit'), 0.0))}"
+    )
+    lines.append(
+        f"- max_industry_weight: {format_pct(safe_float(constraint_validation.get('post_max_industry_weight'), 0.0))} / limit {format_pct(safe_float(constraint_validation.get('max_industry_weight_limit'), 0.0))}"
+    )
+    lines.append(
+        f"- cash_ratio: {format_pct(safe_float(constraint_validation.get('post_cash_ratio'), 0.0))} / limit {format_pct(safe_float(constraint_validation.get('min_cash_ratio_limit'), 0.0))}"
+    )
+    lines.append(
+        f"- compliant: {bool(constraint_validation.get('compliant', False))}"
+    )
+    violations = list(constraint_validation.get("violations", []))
+    if violations:
+        for v in violations:
+            lines.append(f"- violation: {v}")
 
     report_path = run_dir / "portfolio_change_report.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
@@ -650,6 +742,7 @@ def main() -> int:
             DEFAULT_EXECUTION_SETTINGS["stamp_duty_sell_rate"],
         ),
     }
+    enforce_constraint_guard = safe_bool(cfg_execution.get("enforce_constraint_guard"), True)
     max_cost_ratio_guard = safe_float(cfg_execution.get("max_cost_ratio_total_asset"), 0.005)
     execution_costs = estimate_execution_costs(
         total_asset=total_asset,
@@ -677,6 +770,41 @@ def main() -> int:
         if projected_total_asset_after_cost > 0
         else 1.0
     )
+    after_positions_for_validation = after_positions_df.copy()
+    if not after_positions_for_validation.empty:
+        if projected_total_asset_after_cost > 0:
+            after_positions_for_validation["weight"] = (
+                after_positions_for_validation["market_value"] / projected_total_asset_after_cost
+            )
+        else:
+            after_positions_for_validation["weight"] = 0.0
+    constraints = load_constraints(account, cfg)
+    constraint_tolerance = safe_float(cfg_execution.get("constraint_tolerance"), 0.001)
+    constraint_validation = validate_post_execution_constraints(
+        positions_df=after_positions_for_validation,
+        cash_ratio=projected_cash_ratio_after_cost,
+        constraints=constraints,
+        tolerance=constraint_tolerance,
+    )
+    if (
+        enforce_constraint_guard
+        and not bool(constraint_validation.get("compliant", False))
+        and not args.force
+    ):
+        raise SystemExit(
+            "post-execution constraint guard blocked: "
+            + ";".join(constraint_validation.get("violations", []))
+            + ". Use --force to override."
+        )
+    if (
+        enforce_constraint_guard
+        and not bool(constraint_validation.get("compliant", False))
+        and args.force
+    ):
+        warnings.append(
+            "constraint violations detected but forced: "
+            + ";".join(constraint_validation.get("violations", []))
+        )
 
     report_path = generate_portfolio_change_report(
         run_dir=run_dir,
@@ -686,11 +814,12 @@ def main() -> int:
         executed_at=executed_at,
         dry_run=args.dry_run,
         before_df=before_positions_df,
-        after_df=after_positions_df,
+        after_df=after_positions_for_validation,
         before_cash_ratio=before_cash_ratio,
         after_cash_ratio=projected_cash_ratio_after_cost,
         warnings=warnings,
         execution_costs=execution_costs,
+        constraint_validation=constraint_validation,
     )
 
     execution_result = {
@@ -712,7 +841,10 @@ def main() -> int:
         "after_snapshot_path": str(after_snapshot_path),
         "portfolio_change_report_path": str(report_path),
         "execution_costs": execution_costs,
+        "constraint_validation": constraint_validation,
         "max_cost_ratio_guard": round(max_cost_ratio_guard, 8),
+        "enforce_constraint_guard": enforce_constraint_guard,
+        "constraint_tolerance": round(constraint_tolerance, 8),
         "force_override": bool(args.force),
         "estimated_total_execution_cost": round(
             total_execution_cost, 4
@@ -758,6 +890,7 @@ def main() -> int:
         proposal["executed_by"] = args.executor
         proposal["execution_warnings"] = warnings
         proposal["execution_costs"] = execution_costs
+        proposal["constraint_validation"] = constraint_validation
         write_json(proposal_path, proposal)
 
         # 5) audit artifacts

@@ -82,3 +82,7 @@ This document describes the first build milestone of the daily investment agent 
   - `execution.commission_rate`
   - `execution.stamp_duty_sell_rate`
   - `execution.max_cost_ratio_total_asset`
+  - `execution.enforce_constraint_guard`
+  - `execution.constraint_tolerance`
+- Post-execution constraints are validated (single name, industry concentration, cash ratio).
+- Constraint violations block execution by default and can be overridden with `--force`.

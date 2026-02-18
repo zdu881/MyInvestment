@@ -35,6 +35,8 @@
     "slippage_bps": 5.0,
     "commission_rate": 0.0003,
     "stamp_duty_sell_rate": 0.001,
-    "max_cost_ratio_total_asset": 0.005
+    "max_cost_ratio_total_asset": 0.005,
+    "enforce_constraint_guard": true,
+    "constraint_tolerance": 0.001
   }
 }
