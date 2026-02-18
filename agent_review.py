@@ -13,7 +13,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -35,6 +35,26 @@ def append_jsonl(path: Path, row: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def read_jsonl(path: Path) -> List[Dict]:
+    if not path.exists():
+        return []
+    rows: List[Dict] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            text = line.strip()
+            if not text:
+                continue
+            rows.append(json.loads(text))
+    return rows
+
+
+def write_jsonl(path: Path, rows: List[Dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def find_run_dir(run_id: str, runs_root: Path) -> Optional[Path]:
@@ -128,6 +148,27 @@ def main() -> int:
     # Persist review history in state area.
     append_jsonl(Path("state") / "review_history.jsonl", review_record)
 
+    # Update review queue status for this proposal.
+    review_queue_path = Path("state") / "review_queue.jsonl"
+    queue_rows = read_jsonl(review_queue_path)
+    queue_updated = False
+    for row in queue_rows:
+        if (
+            str(row.get("run_id", "")) == run_id
+            and str(row.get("proposal_id", "")) == proposal_id
+            and str(row.get("status", "")).strip().lower() == "pending"
+        ):
+            row["status"] = "reviewed"
+            row["reviewed_at"] = timestamp
+            row["reviewed_by"] = args.reviewer
+            row["human_decision"] = args.decision
+            row["final_action"] = final_action
+            row["review_note"] = args.note
+            queue_updated = True
+            break
+    if queue_rows and queue_updated:
+        write_jsonl(review_queue_path, queue_rows)
+
     # Optional execution preview and queue creation for approved rebalance only.
     if final_action == "approved_rebalance":
         actions_path = run_dir / "rebalance_actions.csv"
@@ -178,6 +219,23 @@ def main() -> int:
                         }
                     )
                 if orders:
+                    existing_exec_queue = read_jsonl(Path("state") / "execution_queue.jsonl")
+                    already_queued = any(
+                        str(x.get("run_id", "")) == run_id
+                        and str(x.get("proposal_id", "")) == proposal_id
+                        and str(x.get("status", "")).strip().lower() in {"pending", "executed"}
+                        for x in existing_exec_queue
+                    )
+                    if already_queued:
+                        lines.append("- Execution queue already contains this proposal, skip duplicate enqueue.")
+                        preview_path.write_text("\n".join(lines), encoding="utf-8")
+                        print(f"[INFO] reviewed run_id={run_id}")
+                        print(f"[INFO] human_decision={args.decision}")
+                        print(f"[INFO] final_action={final_action}")
+                        print(f"[INFO] proposal_path={proposal_path}")
+                        print(f"[INFO] review_file={run_review_path}")
+                        return 0
+
                     pd.DataFrame(orders).to_csv(execution_orders_path, index=False, encoding="utf-8-sig")
                     queue_item = {
                         "queue_id": str(uuid.uuid4()),

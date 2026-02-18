@@ -32,6 +32,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run`
 - Force execution when cost guard blocks (use carefully):
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force`
+- Generate operations health report:
+  - `python3 agent_ops_report.py --days 7`
 
 ## Scheduling (cron example)
 
@@ -86,3 +88,6 @@ This document describes the first build milestone of the daily investment agent 
   - `execution.constraint_tolerance`
 - Post-execution constraints are validated (single name, industry concentration, cash ratio).
 - Constraint violations block execution by default and can be overridden with `--force`.
+- `agent_ops_report.py` writes summary reports to:
+  - `runs/ops/ops_report_latest.md`
+  - `runs/ops/ops_report_latest.json`
