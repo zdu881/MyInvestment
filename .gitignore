@@ -9,6 +9,8 @@ state/execution_history.jsonl
 state/maintenance_last_run.json
 state/model_feedback.json
 state/proposal_quality_history.jsonl
+state/alerts_state.json
+state/alerts_events.jsonl
 state/archive/
 knowledge/skill_candidates.jsonl
 knowledge/skills_registry_history.jsonl

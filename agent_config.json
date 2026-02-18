@@ -53,5 +53,22 @@
     "quality_threshold": 0.62,
     "promote_delta": 0.08,
     "owner": "auto_agent"
+  },
+  "ops_alerts": {
+    "health_score_warn": 80.0,
+    "health_score_critical": 70.0,
+    "stale_review_warn": 1,
+    "stale_execution_warn": 1,
+    "oldest_review_hours_warn": 24.0,
+    "oldest_review_hours_critical": 48.0,
+    "oldest_execution_hours_warn": 24.0,
+    "oldest_execution_hours_critical": 48.0,
+    "quality_score_warn": 0.6,
+    "quality_score_critical": 0.5,
+    "quality_min_sample_size": 3,
+    "feedback_min_confidence_warn": 0.78,
+    "report_stale_hours_warn": 8.0,
+    "report_stale_hours_critical": 24.0,
+    "reminder_hours": 24.0
   }
 }

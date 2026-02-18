@@ -151,6 +151,64 @@ def run_skill_promotion(cfg: Dict, dry_run: bool) -> int:
     return proc.returncode
 
 
+def run_alerts(cfg: Dict, dry_run: bool) -> int:
+    paths = cfg.get("paths", {}) if isinstance(cfg.get("paths", {}), dict) else {}
+    alert_cfg = cfg.get("ops_alerts", {}) if isinstance(cfg.get("ops_alerts", {}), dict) else {}
+
+    runs_root = str(paths.get("runs_root", "runs"))
+    state_root = str(paths.get("state_root", "state"))
+    ops_report_json = f"{runs_root}/ops/ops_report_latest.json"
+    quality_report_json = f"{runs_root}/ops/proposal_quality_latest.json"
+    model_feedback_json = f"{state_root}/model_feedback.json"
+
+    cmd = [
+        sys.executable,
+        "agent_alerts.py",
+        "--ops-report-json",
+        ops_report_json,
+        "--quality-report-json",
+        quality_report_json,
+        "--model-feedback-json",
+        model_feedback_json,
+        "--state-root",
+        state_root,
+        "--health-score-warn",
+        str(float(alert_cfg.get("health_score_warn", 80.0))),
+        "--health-score-critical",
+        str(float(alert_cfg.get("health_score_critical", 70.0))),
+        "--stale-review-warn",
+        str(int(alert_cfg.get("stale_review_warn", 1))),
+        "--stale-execution-warn",
+        str(int(alert_cfg.get("stale_execution_warn", 1))),
+        "--oldest-review-hours-warn",
+        str(float(alert_cfg.get("oldest_review_hours_warn", 24.0))),
+        "--oldest-review-hours-critical",
+        str(float(alert_cfg.get("oldest_review_hours_critical", 48.0))),
+        "--oldest-execution-hours-warn",
+        str(float(alert_cfg.get("oldest_execution_hours_warn", 24.0))),
+        "--oldest-execution-hours-critical",
+        str(float(alert_cfg.get("oldest_execution_hours_critical", 48.0))),
+        "--quality-score-warn",
+        str(float(alert_cfg.get("quality_score_warn", 0.6))),
+        "--quality-score-critical",
+        str(float(alert_cfg.get("quality_score_critical", 0.5))),
+        "--quality-min-sample-size",
+        str(int(alert_cfg.get("quality_min_sample_size", 3))),
+        "--feedback-min-confidence-warn",
+        str(float(alert_cfg.get("feedback_min_confidence_warn", 0.78))),
+        "--report-stale-hours-warn",
+        str(float(alert_cfg.get("report_stale_hours_warn", 8.0))),
+        "--report-stale-hours-critical",
+        str(float(alert_cfg.get("report_stale_hours_critical", 24.0))),
+        "--reminder-hours",
+        str(float(alert_cfg.get("reminder_hours", 24.0))),
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    proc = subprocess.run(cmd)
+    return proc.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run due phase for agent system")
     parser.add_argument("--config", default="agent_config.json")
@@ -160,6 +218,7 @@ def main() -> int:
     parser.add_argument("--skip-ops-report", action="store_true")
     parser.add_argument("--skip-feedback", action="store_true")
     parser.add_argument("--skip-skill-promotion", action="store_true")
+    parser.add_argument("--skip-alerts", action="store_true")
     parser.add_argument("--ops-on-idle", action="store_true")
     parser.add_argument("--ops-days", type=int, default=7)
     parser.add_argument("--feedback-days", type=int, default=30)
@@ -246,6 +305,13 @@ def main() -> int:
                 print("[ERROR] ops report generation failed")
                 return ret
             print("[INFO] ops report refreshed")
+
+        if not args.skip_alerts:
+            ret = run_alerts(cfg, args.dry_run)
+            if ret != 0:
+                print("[ERROR] alert channel refresh failed")
+                return ret
+            print("[INFO] alert channel refreshed")
 
         return 0
     finally:
