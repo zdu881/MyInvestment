@@ -165,6 +165,251 @@ def load_name_map(run_dir: Path) -> Dict[str, str]:
     return name_map
 
 
+def load_positions_df(path: Path) -> pd.DataFrame:
+    cols = [
+        "ticker",
+        "name",
+        "shares",
+        "avg_cost",
+        "last_price",
+        "market_value",
+        "weight",
+        "industry",
+        "updated_at",
+    ]
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+
+    df = pd.read_csv(path, dtype={"ticker": str})
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    df = df.copy()
+    for c in cols:
+        if c not in df.columns:
+            df[c] = "" if c in {"ticker", "name", "industry", "updated_at"} else 0.0
+
+    df["ticker"] = df["ticker"].apply(normalize_ticker)
+    for c in ["shares", "avg_cost", "last_price", "market_value", "weight"]:
+        df[c] = df[c].apply(safe_float)
+    df["name"] = df["name"].astype(str)
+    df["industry"] = df["industry"].fillna("未知").astype(str)
+    df["updated_at"] = df["updated_at"].astype(str)
+
+    return df[cols].copy()
+
+
+def rows_to_positions_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "name",
+                "shares",
+                "avg_cost",
+                "last_price",
+                "market_value",
+                "weight",
+                "industry",
+                "updated_at",
+            ]
+        )
+    return load_positions_df_from_df(pd.DataFrame(rows))
+
+
+def load_positions_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "ticker",
+        "name",
+        "shares",
+        "avg_cost",
+        "last_price",
+        "market_value",
+        "weight",
+        "industry",
+        "updated_at",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            out[c] = "" if c in {"ticker", "name", "industry", "updated_at"} else 0.0
+
+    out["ticker"] = out["ticker"].apply(normalize_ticker)
+    for c in ["shares", "avg_cost", "last_price", "market_value", "weight"]:
+        out[c] = out[c].apply(safe_float)
+    out["name"] = out["name"].astype(str)
+    out["industry"] = out["industry"].fillna("未知").astype(str)
+    out["updated_at"] = out["updated_at"].astype(str)
+    return out[cols].copy()
+
+
+def industry_exposure(df: pd.DataFrame) -> Dict[str, float]:
+    if df.empty:
+        return {}
+    grouped = df.groupby("industry", dropna=False)["weight"].sum()
+    return {str(k): float(v) for k, v in grouped.to_dict().items()}
+
+
+def concentration_metrics(df: pd.DataFrame) -> Dict[str, float]:
+    if df.empty:
+        return {"top1_weight": 0.0, "top3_weight": 0.0, "hhi": 0.0}
+    weights = sorted([safe_float(v, 0.0) for v in df["weight"].tolist()], reverse=True)
+    top1 = weights[0] if weights else 0.0
+    top3 = sum(weights[:3]) if weights else 0.0
+    hhi = sum(w * w for w in weights)
+    return {"top1_weight": top1, "top3_weight": top3, "hhi": hhi}
+
+
+def format_pct(value: float) -> str:
+    return f"{value:.2%}"
+
+
+def generate_portfolio_change_report(
+    run_dir: Path,
+    run_id: str,
+    proposal_id: str,
+    executor: str,
+    executed_at: str,
+    dry_run: bool,
+    before_df: pd.DataFrame,
+    after_df: pd.DataFrame,
+    before_cash_ratio: float,
+    after_cash_ratio: float,
+    warnings: List[str],
+) -> Path:
+    before_map = {
+        normalize_ticker(r["ticker"]): safe_float(r.get("weight"), 0.0)
+        for _, r in before_df.iterrows()
+    }
+    after_map = {
+        normalize_ticker(r["ticker"]): safe_float(r.get("weight"), 0.0)
+        for _, r in after_df.iterrows()
+    }
+    name_map: Dict[str, str] = {}
+    for _, r in before_df.iterrows():
+        name_map[normalize_ticker(r["ticker"])] = str(r.get("name", "N/A"))
+    for _, r in after_df.iterrows():
+        t = normalize_ticker(r["ticker"])
+        if t not in name_map:
+            name_map[t] = str(r.get("name", "N/A"))
+
+    added: List[str] = []
+    removed: List[str] = []
+    increased: List[str] = []
+    decreased: List[str] = []
+    threshold = 1e-9
+
+    all_tickers = sorted(set(before_map.keys()) | set(after_map.keys()))
+    for ticker in all_tickers:
+        b = before_map.get(ticker, 0.0)
+        a = after_map.get(ticker, 0.0)
+        delta = a - b
+        if b <= threshold and a > threshold:
+            added.append(f"{ticker} {name_map.get(ticker, 'N/A')} ({format_pct(a)})")
+        elif b > threshold and a <= threshold:
+            removed.append(f"{ticker} {name_map.get(ticker, 'N/A')} ({format_pct(b)})")
+        elif delta > threshold:
+            increased.append(
+                f"{ticker} {name_map.get(ticker, 'N/A')} ({format_pct(b)} -> {format_pct(a)})"
+            )
+        elif delta < -threshold:
+            decreased.append(
+                f"{ticker} {name_map.get(ticker, 'N/A')} ({format_pct(b)} -> {format_pct(a)})"
+            )
+
+    before_ind = industry_exposure(before_df)
+    after_ind = industry_exposure(after_df)
+    industries = sorted(set(before_ind.keys()) | set(after_ind.keys()))
+
+    before_conc = concentration_metrics(before_df)
+    after_conc = concentration_metrics(after_df)
+
+    lines: List[str] = []
+    lines.append("# Portfolio Change Report")
+    lines.append("")
+    lines.append(f"- run_id: {run_id}")
+    lines.append(f"- proposal_id: {proposal_id}")
+    lines.append(f"- executed_at: {executed_at}")
+    lines.append(f"- executor: {executor}")
+    lines.append(f"- dry_run: {dry_run}")
+    lines.append("")
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(
+        f"- holdings_count: {len(before_df)} -> {len(after_df)}"
+    )
+    lines.append(
+        f"- cash_ratio: {format_pct(before_cash_ratio)} -> {format_pct(after_cash_ratio)}"
+    )
+    lines.append(
+        f"- concentration(top1): {format_pct(before_conc['top1_weight'])} -> {format_pct(after_conc['top1_weight'])}"
+    )
+    lines.append(
+        f"- concentration(top3): {format_pct(before_conc['top3_weight'])} -> {format_pct(after_conc['top3_weight'])}"
+    )
+    lines.append(
+        f"- HHI: {before_conc['hhi']:.4f} -> {after_conc['hhi']:.4f}"
+    )
+    lines.append("")
+
+    lines.append("## Position Changes")
+    lines.append("")
+    if added:
+        lines.append("- Added:")
+        for x in added:
+            lines.append(f"  - {x}")
+    if removed:
+        lines.append("- Removed:")
+        for x in removed:
+            lines.append(f"  - {x}")
+    if increased:
+        lines.append("- Increased:")
+        for x in increased:
+            lines.append(f"  - {x}")
+    if decreased:
+        lines.append("- Decreased:")
+        for x in decreased:
+            lines.append(f"  - {x}")
+    if not any([added, removed, increased, decreased]):
+        lines.append("- No material position changes.")
+    lines.append("")
+
+    lines.append("## Industry Exposure Delta")
+    lines.append("")
+    if industries:
+        for ind in industries:
+            b = before_ind.get(ind, 0.0)
+            a = after_ind.get(ind, 0.0)
+            lines.append(
+                f"- {ind}: {format_pct(b)} -> {format_pct(a)} (delta={format_pct(a - b)})"
+            )
+    else:
+        lines.append("- No industry exposure data.")
+    lines.append("")
+
+    lines.append("## Risk Notes")
+    lines.append("")
+    if warnings:
+        for w in warnings:
+            lines.append(f"- {w}")
+    else:
+        lines.append("- No execution warnings.")
+    lines.append(
+        f"- Max industry exposure after execution: {format_pct(max(after_ind.values()) if after_ind else 0.0)}"
+    )
+    lines.append(
+        f"- Top holding weight after execution: {format_pct(after_conc['top1_weight'])}"
+    )
+
+    report_path = run_dir / "portfolio_change_report.md"
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Execute approved rebalance task")
     parser.add_argument("--queue-id", default="")
@@ -226,9 +471,12 @@ def main() -> int:
     positions_path = state_root / "current_positions.csv"
 
     account = load_json(account_path)
+    before_positions_df = load_positions_df(positions_path)
     total_asset = safe_float(account.get("total_asset"), 0.0)
     if total_asset <= 0:
         raise SystemExit("account total_asset must be > 0")
+    before_cash = safe_float(account.get("cash"), 0.0)
+    before_cash_ratio = safe_float(account.get("cash_ratio"), 0.0)
 
     price_map = load_price_map(run_dir)
     name_map = load_name_map(run_dir)
@@ -273,6 +521,29 @@ def main() -> int:
     stock_asset = sum(float(r["market_value"]) for r in new_rows)
     cash = max(0.0, total_asset - stock_asset)
     cash_ratio = cash / total_asset if total_asset > 0 else 1.0
+    after_positions_df = rows_to_positions_df(new_rows)
+
+    if not orders_path.exists():
+        warnings.append(f"execution orders file not found: {orders_path}")
+
+    before_snapshot_path = run_dir / "portfolio_before_snapshot.csv"
+    after_snapshot_path = run_dir / "portfolio_after_snapshot.csv"
+    before_positions_df.to_csv(before_snapshot_path, index=False, encoding="utf-8-sig")
+    after_positions_df.to_csv(after_snapshot_path, index=False, encoding="utf-8-sig")
+
+    report_path = generate_portfolio_change_report(
+        run_dir=run_dir,
+        run_id=run_id,
+        proposal_id=proposal_id,
+        executor=args.executor,
+        executed_at=executed_at,
+        dry_run=args.dry_run,
+        before_df=before_positions_df,
+        after_df=after_positions_df,
+        before_cash_ratio=before_cash_ratio,
+        after_cash_ratio=cash_ratio,
+        warnings=warnings,
+    )
 
     execution_result = {
         "timestamp": executed_at,
@@ -281,10 +552,16 @@ def main() -> int:
         "queue_id": str(queue_item.get("queue_id", "")),
         "executor": args.executor,
         "dry_run": args.dry_run,
+        "before_position_count": len(before_positions_df),
         "position_count": len(new_rows),
+        "before_cash": round(before_cash, 4),
+        "before_cash_ratio": round(before_cash_ratio, 6),
         "stock_asset": round(stock_asset, 4),
         "cash": round(cash, 4),
         "cash_ratio": round(cash_ratio, 6),
+        "before_snapshot_path": str(before_snapshot_path),
+        "after_snapshot_path": str(after_snapshot_path),
+        "portfolio_change_report_path": str(report_path),
         "warnings": warnings,
     }
 
@@ -334,6 +611,8 @@ def main() -> int:
         })
     else:
         execution_result["note"] = "dry-run only, state not changed"
+        result_path = run_dir / "execution_result.json"
+        write_json(result_path, execution_result)
 
     print(f"[INFO] run_id={run_id}")
     print(f"[INFO] proposal_id={proposal_id}")
@@ -341,6 +620,7 @@ def main() -> int:
     print(f"[INFO] dry_run={args.dry_run}")
     print(f"[INFO] position_count={len(new_rows)}")
     print(f"[INFO] cash_ratio={cash_ratio:.2%}")
+    print(f"[INFO] report={report_path}")
     if warnings:
         print(f"[WARN] warnings={len(warnings)}")
 

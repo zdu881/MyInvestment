@@ -51,6 +51,8 @@ This document describes the first build milestone of the daily investment agent 
 - `skill_candidates.jsonl`: run-level skill discovery candidates.
 - `execution_orders.csv`: queued execution orders generated after approved rebalance.
 - `execution_result.json`: execution outcome and state update summary.
+- `portfolio_change_report.md`: before/after portfolio and risk exposure diff report.
+- `portfolio_before_snapshot.csv` and `portfolio_after_snapshot.csv`: execution snapshots.
 - `advice_report.md`: human-review proposal report.
 
 ## Manual review policy
