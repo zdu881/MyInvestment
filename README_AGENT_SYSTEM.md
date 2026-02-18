@@ -26,6 +26,10 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_scheduler.py --once --dry-run`
 - Manual review (approve/hold/reject):
   - `python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_name --note "approved after manual check"`
+- Execute approved task and update state:
+  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name`
+- Execution dry-run (do not mutate state):
+  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run`
 
 ## Scheduling (cron example)
 
@@ -45,6 +49,8 @@ This document describes the first build milestone of the daily investment agent 
 - `decision_log.jsonl`: run-level decision log.
 - `review_request.json`: pending manual review payload.
 - `skill_candidates.jsonl`: run-level skill discovery candidates.
+- `execution_orders.csv`: queued execution orders generated after approved rebalance.
+- `execution_result.json`: execution outcome and state update summary.
 - `advice_report.md`: human-review proposal report.
 
 ## Manual review policy
@@ -53,6 +59,7 @@ This document describes the first build milestone of the daily investment agent 
 - Every action is marked for manual review.
 - Use `advice_report.md` and gate results before any execution.
 - Use `agent_review.py` to finalize `approve/hold/reject`.
+- Use `agent_execute.py` to apply an approved rebalance to state files.
 
 ## Skill accumulation
 
@@ -65,3 +72,4 @@ This document describes the first build milestone of the daily investment agent 
 - In `--dry-run` mode, external tools are not required.
 - In non-dry mode, `postclose` attempts to run `step1_screener.py` and `step2_financial_cleaner.py`.
 - If those scripts fail, existing candidate CSV files are still used as fallback when available.
+- `agent_execute.py` writes state mutations only when not using `--dry-run`.

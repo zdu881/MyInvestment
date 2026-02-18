@@ -10,6 +10,7 @@ It does not execute trades; it only finalizes review outcomes.
 
 import argparse
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional
@@ -127,10 +128,11 @@ def main() -> int:
     # Persist review history in state area.
     append_jsonl(Path("state") / "review_history.jsonl", review_record)
 
-    # Optional execution preview for approved rebalance only.
+    # Optional execution preview and queue creation for approved rebalance only.
     if final_action == "approved_rebalance":
         actions_path = run_dir / "rebalance_actions.csv"
         preview_path = run_dir / "execution_plan.md"
+        execution_orders_path = run_dir / "execution_orders.csv"
         lines = [
             "# Execution Plan Preview",
             "",
@@ -149,11 +151,50 @@ def main() -> int:
             if df.empty:
                 lines.append("- No actionable trades after threshold filters.")
             else:
+                orders = []
                 for _, row in df.iterrows():
+                    ticker = str(row.get("ticker", "")).strip().zfill(6)
+                    action = str(row.get("action", "HOLD")).strip()
+                    current_weight = float(row.get("current_weight", 0))
+                    target_weight = float(row.get("target_weight", 0))
+                    delta_weight = float(row.get("delta_weight", 0))
                     lines.append(
-                        f"- {row['action']} {row['ticker']} {row.get('name', 'N/A')} | "
-                        f"{float(row.get('current_weight', 0)):.2%} -> {float(row.get('target_weight', 0)):.2%}"
+                        f"- {action} {ticker} {row.get('name', 'N/A')} | "
+                        f"{current_weight:.2%} -> {target_weight:.2%}"
                     )
+                    orders.append(
+                        {
+                            "order_id": str(uuid.uuid4()),
+                            "run_id": run_id,
+                            "proposal_id": proposal_id,
+                            "ticker": ticker,
+                            "name": str(row.get("name", "N/A")),
+                            "action": action,
+                            "current_weight": round(current_weight, 4),
+                            "target_weight": round(target_weight, 4),
+                            "delta_weight": round(delta_weight, 4),
+                            "status": "pending",
+                            "created_at": timestamp,
+                        }
+                    )
+                if orders:
+                    pd.DataFrame(orders).to_csv(execution_orders_path, index=False, encoding="utf-8-sig")
+                    queue_item = {
+                        "queue_id": str(uuid.uuid4()),
+                        "run_id": run_id,
+                        "proposal_id": proposal_id,
+                        "status": "pending",
+                        "created_at": timestamp,
+                        "created_by": args.reviewer,
+                        "order_count": len(orders),
+                        "execution_orders_path": str(execution_orders_path),
+                    }
+                    append_jsonl(Path("state") / "execution_queue.jsonl", queue_item)
+                    proposal["execution_status"] = "queued"
+                    proposal["execution_queue_id"] = queue_item["queue_id"]
+                    write_json(proposal_path, proposal)
+                    review_record["execution_queue_id"] = queue_item["queue_id"]
+                    review_record["execution_orders_path"] = str(execution_orders_path)
         else:
             lines.append("- rebalance_actions.csv not found.")
         preview_path.write_text("\n".join(lines), encoding="utf-8")

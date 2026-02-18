@@ -4,5 +4,7 @@ runs/
 decision_log.jsonl
 state/review_queue.jsonl
 state/review_history.jsonl
+state/execution_queue.jsonl
+state/execution_history.jsonl
 knowledge/skill_candidates.jsonl
 runs/scheduler.lock
