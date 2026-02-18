@@ -1,0 +1,10 @@
+{
+  "cash": 10000,
+  "total_asset": 10000,
+  "stock_asset": 0,
+  "cash_ratio": 1.0,
+  "max_single_weight": 0.3,
+  "max_industry_weight": 0.5,
+  "min_cash_ratio": 0.1,
+  "risk_profile": "defensive"
+}

@@ -1,0 +1,33 @@
+{
+  "timezone_offset_hours": 8,
+  "paths": {
+    "runs_root": "runs",
+    "state_root": "state",
+    "step1_csv": "candidates.csv",
+    "step2_csv": "candidates_step2.csv"
+  },
+  "schedule": {
+    "preopen": "08:30",
+    "intraday": "12:30",
+    "postclose": "20:30"
+  },
+  "postclose": {
+    "max_candidates_for_research": 8,
+    "max_new_positions": 3,
+    "default_transaction_cost_rate": 0.0015
+  },
+  "gates": {
+    "min_evidence_completeness": 0.6,
+    "min_action_delta": 0.02,
+    "max_allowed_constraint_violations": 0
+  },
+  "constraints": {
+    "max_single_weight": 0.3,
+    "max_industry_weight": 0.5,
+    "min_cash_ratio": 0.1
+  },
+  "alerts": {
+    "intraday_loss_alert_pct": -5.0,
+    "intraday_profit_alert_pct": 8.0
+  }
+}
