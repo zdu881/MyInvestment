@@ -70,5 +70,10 @@
     "report_stale_hours_warn": 8.0,
     "report_stale_hours_critical": 24.0,
     "reminder_hours": 24.0
+  },
+  "action_center": {
+    "max_review_items": 8,
+    "max_execution_items": 8,
+    "max_alerts": 8
   }
 }

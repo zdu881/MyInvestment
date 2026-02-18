@@ -209,6 +209,27 @@ def run_alerts(cfg: Dict, dry_run: bool) -> int:
     return proc.returncode
 
 
+def run_action_center(cfg: Dict) -> int:
+    paths = cfg.get("paths", {}) if isinstance(cfg.get("paths", {}), dict) else {}
+    center_cfg = cfg.get("action_center", {}) if isinstance(cfg.get("action_center", {}), dict) else {}
+    cmd = [
+        sys.executable,
+        "agent_action_center.py",
+        "--state-root",
+        str(paths.get("state_root", "state")),
+        "--runs-root",
+        str(paths.get("runs_root", "runs")),
+        "--max-review-items",
+        str(int(center_cfg.get("max_review_items", 8))),
+        "--max-execution-items",
+        str(int(center_cfg.get("max_execution_items", 8))),
+        "--max-alerts",
+        str(int(center_cfg.get("max_alerts", 8))),
+    ]
+    proc = subprocess.run(cmd)
+    return proc.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run due phase for agent system")
     parser.add_argument("--config", default="agent_config.json")
@@ -219,6 +240,7 @@ def main() -> int:
     parser.add_argument("--skip-feedback", action="store_true")
     parser.add_argument("--skip-skill-promotion", action="store_true")
     parser.add_argument("--skip-alerts", action="store_true")
+    parser.add_argument("--skip-action-center", action="store_true")
     parser.add_argument("--ops-on-idle", action="store_true")
     parser.add_argument("--ops-days", type=int, default=7)
     parser.add_argument("--feedback-days", type=int, default=30)
@@ -312,6 +334,13 @@ def main() -> int:
                 print("[ERROR] alert channel refresh failed")
                 return ret
             print("[INFO] alert channel refreshed")
+
+        if not args.skip_action_center:
+            ret = run_action_center(cfg)
+            if ret != 0:
+                print("[ERROR] action center refresh failed")
+                return ret
+            print("[INFO] action center refreshed")
 
         return 0
     finally:

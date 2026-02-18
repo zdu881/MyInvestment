@@ -50,12 +50,14 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_skill_manager.py`
 - Refresh operational alert channel:
   - `python3 agent_alerts.py`
+- Refresh operations action center:
+  - `python3 agent_action_center.py`
 
 ## Scheduling (cron example)
 
 - Run scheduler every 5 minutes:
   - `*/5 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_scheduler.py --once >> /tmp/myinvestment_scheduler.log 2>&1`
-- By default scheduler runs queue maintenance + proposal quality feedback + skill promotion + alert channel after each trigger, and refreshes ops report when a phase is executed.
+- By default scheduler runs queue maintenance + proposal quality feedback + skill promotion + alert channel + action center after each trigger, and refreshes ops report when a phase is executed.
 - Optional: refresh ops report even when no phase is due:
   - `*/30 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_scheduler.py --once --ops-on-idle --skip-maintenance >> /tmp/myinvestment_ops.log 2>&1`
 
@@ -79,6 +81,7 @@ This document describes the first build milestone of the daily investment agent 
 - `portfolio_before_snapshot.csv` and `portfolio_after_snapshot.csv`: execution snapshots.
 - `advice_report.md`: human-review proposal report.
 - `runs/ops/alerts_latest.md` and `runs/ops/alerts_latest.json`: current alert status and transitions.
+- `runs/ops/action_center_latest.md` and `runs/ops/action_center_latest.json`: one-page actionable console for pending reviews/executions.
 
 ## Manual review policy
 
@@ -109,6 +112,11 @@ This document describes the first build milestone of the daily investment agent 
 - Alert transition events are appended to `state/alerts_events.jsonl` (`opened`, `escalated`, `deescalated`, `resolved`, `reminder`).
 - Use `ops_alerts` section in `agent_config.json` to tune thresholds.
 
+## Action center
+
+- `agent_action_center.py` consolidates health, alerts, pending review queue, and pending execution queue into a single decision dashboard.
+- It is refreshed by scheduler by default and can be consumed as `runs/ops/action_center_latest.md`.
+
 ## Notes
 
 - In `--dry-run` mode, external tools are not required.
@@ -133,6 +141,7 @@ This document describes the first build milestone of the daily investment agent 
   - `--skip-feedback`: skip proposal quality scoring / feedback refresh
   - `--skip-skill-promotion`: skip auto skill promotion refresh
   - `--skip-alerts`: skip alert channel refresh
+  - `--skip-action-center`: skip action center refresh
   - `--ops-on-idle`: refresh ops report even when no phase is due
 - Ops report queue metrics include:
   - `pending_review`, `pending_execution`
