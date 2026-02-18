@@ -15,7 +15,7 @@ The report summarizes:
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -128,6 +128,10 @@ def compute_health_score(
     failed_runs: int,
     pending_reviews: int,
     pending_execs: int,
+    stale_reviews: int,
+    stale_execs: int,
+    oldest_pending_review_hours: Optional[float],
+    oldest_pending_execution_hours: Optional[float],
     constraint_violation_execs: int,
 ) -> float:
     score = 100.0
@@ -136,8 +140,14 @@ def compute_health_score(
         score -= min(30.0, (0.95 - run_success_rate) / 0.95 * 30.0)
     score -= min(20.0, pending_reviews * 2.0)
     score -= min(15.0, pending_execs * 3.0)
+    score -= min(12.0, stale_reviews * 3.0)
+    score -= min(12.0, stale_execs * 4.0)
     score -= min(20.0, failed_runs * 4.0)
     score -= min(15.0, constraint_violation_execs * 3.0)
+    if oldest_pending_review_hours is not None and oldest_pending_review_hours > 24.0:
+        score -= min(6.0, (oldest_pending_review_hours - 24.0) / 24.0 * 6.0)
+    if oldest_pending_execution_hours is not None and oldest_pending_execution_hours > 24.0:
+        score -= min(6.0, (oldest_pending_execution_hours - 24.0) / 24.0 * 6.0)
 
     if score < 0:
         score = 0.0
@@ -152,6 +162,22 @@ def score_label(score: float) -> str:
     if score >= 70:
         return "watch"
     return "risk"
+
+
+def age_hours(ts: str, now_utc: datetime) -> Optional[float]:
+    dt = parse_iso_datetime(ts)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = now_utc - dt.astimezone(timezone.utc)
+    return delta.total_seconds() / 3600.0
+
+
+def fmt_hours(hours: Optional[float]) -> str:
+    if hours is None:
+        return "N/A"
+    return f"{hours:.2f}"
 
 
 def build_markdown(summary: Dict[str, Any]) -> str:
@@ -186,7 +212,10 @@ def build_markdown(summary: Dict[str, Any]) -> str:
         f"- reviewed: {summary['proposal_stats']['reviewed']} | pending_review: {summary['queue_stats']['pending_review']}"
     )
     lines.append(
-        f"- pending_execution: {summary['queue_stats']['pending_execution']}"
+        f"- stale_review: {summary['queue_stats']['stale_review']} | oldest_pending_review_hours: {fmt_hours(summary['queue_stats']['oldest_pending_review_hours'])}"
+    )
+    lines.append(
+        f"- pending_execution: {summary['queue_stats']['pending_execution']} | stale_execution: {summary['queue_stats']['stale_execution']} | oldest_pending_execution_hours: {fmt_hours(summary['queue_stats']['oldest_pending_execution_hours'])}"
     )
 
     lines.append("")
@@ -306,12 +335,32 @@ def main() -> int:
 
     # Queue stats
     review_queue = read_jsonl(state_root / "review_queue.jsonl")
-    pending_review = sum(1 for r in review_queue if str(r.get("status", "")).strip().lower() == "pending")
+    pending_review_rows = [
+        r for r in review_queue if str(r.get("status", "")).strip().lower() == "pending"
+    ]
+    pending_review = len(pending_review_rows)
+    stale_review = sum(1 for r in pending_review_rows if bool(r.get("stale", False)))
 
     execution_queue = read_jsonl(state_root / "execution_queue.jsonl")
-    pending_execution = sum(
-        1 for r in execution_queue if str(r.get("status", "")).strip().lower() == "pending"
-    )
+    pending_execution_rows = [
+        r for r in execution_queue if str(r.get("status", "")).strip().lower() == "pending"
+    ]
+    pending_execution = len(pending_execution_rows)
+    stale_execution = sum(1 for r in pending_execution_rows if bool(r.get("stale", False)))
+
+    now_utc = datetime.now(timezone.utc)
+    review_ages = [
+        age_hours(str(r.get("timestamp") or r.get("created_at") or ""), now_utc)
+        for r in pending_review_rows
+    ]
+    execution_ages = [
+        age_hours(str(r.get("created_at") or r.get("timestamp") or ""), now_utc)
+        for r in pending_execution_rows
+    ]
+    review_ages = [h for h in review_ages if h is not None]
+    execution_ages = [h for h in execution_ages if h is not None]
+    oldest_pending_review_hours = max(review_ages) if review_ages else None
+    oldest_pending_execution_hours = max(execution_ages) if execution_ages else None
 
     # Execution quality in window
     execution_history = read_jsonl(state_root / "execution_history.jsonl")
@@ -350,6 +399,10 @@ def main() -> int:
         failed_runs=run_failed,
         pending_reviews=pending_review,
         pending_execs=pending_execution,
+        stale_reviews=stale_review,
+        stale_execs=stale_execution,
+        oldest_pending_review_hours=oldest_pending_review_hours,
+        oldest_pending_execution_hours=oldest_pending_execution_hours,
         constraint_violation_execs=constraint_violation_execs,
     )
 
@@ -376,6 +429,14 @@ def main() -> int:
         "queue_stats": {
             "pending_review": pending_review,
             "pending_execution": pending_execution,
+            "stale_review": stale_review,
+            "stale_execution": stale_execution,
+            "oldest_pending_review_hours": round(oldest_pending_review_hours, 2)
+            if oldest_pending_review_hours is not None
+            else None,
+            "oldest_pending_execution_hours": round(oldest_pending_execution_hours, 2)
+            if oldest_pending_execution_hours is not None
+            else None,
         },
         "execution_stats": {
             "total": len(execution_rows),

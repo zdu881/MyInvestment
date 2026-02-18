@@ -34,11 +34,17 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force`
 - Generate operations health report:
   - `python3 agent_ops_report.py --days 7`
+- Queue maintenance dry-run (stale mark + archive preview):
+  - `python3 agent_queue_maintenance.py --dry-run`
+- Queue maintenance apply:
+  - `python3 agent_queue_maintenance.py`
 
 ## Scheduling (cron example)
 
 - Run scheduler every 5 minutes:
   - `*/5 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_scheduler.py --once >> /tmp/myinvestment_scheduler.log 2>&1`
+- Run queue maintenance every hour:
+  - `0 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_queue_maintenance.py >> /tmp/myinvestment_maintenance.log 2>&1`
 
 ## Core outputs per run
 
@@ -91,3 +97,7 @@ This document describes the first build milestone of the daily investment agent 
 - `agent_ops_report.py` writes summary reports to:
   - `runs/ops/ops_report_latest.md`
   - `runs/ops/ops_report_latest.json`
+- Ops report queue metrics include:
+  - `pending_review`, `pending_execution`
+  - `stale_review`, `stale_execution`
+  - `oldest_pending_review_hours`, `oldest_pending_execution_hours`
