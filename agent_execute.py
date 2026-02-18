@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+DEFAULT_EXECUTION_SETTINGS = {
+    "slippage_bps": 5.0,
+    "commission_rate": 0.0003,
+    "stamp_duty_sell_rate": 0.001,
+}
+
 
 def now_local_iso(tz_hours: int = 8) -> str:
     now = datetime.now(timezone(timedelta(hours=tz_hours)))
@@ -45,6 +51,12 @@ def load_json(path: Path) -> Dict[str, Any]:
         return {}
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_runtime_config(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    return load_json(path)
 
 
 def write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -279,6 +291,7 @@ def generate_portfolio_change_report(
     before_cash_ratio: float,
     after_cash_ratio: float,
     warnings: List[str],
+    execution_costs: Dict[str, Any],
 ) -> Path:
     before_map = {
         normalize_ticker(r["ticker"]): safe_float(r.get("weight"), 0.0)
@@ -404,10 +417,98 @@ def generate_portfolio_change_report(
     lines.append(
         f"- Top holding weight after execution: {format_pct(after_conc['top1_weight'])}"
     )
+    lines.append("")
+
+    lines.append("## Execution Cost Estimate")
+    lines.append("")
+    lines.append(
+        f"- traded_value: {safe_float(execution_costs.get('traded_value'), 0.0):.2f}"
+    )
+    lines.append(
+        f"- buy_value: {safe_float(execution_costs.get('buy_value'), 0.0):.2f}, sell_value: {safe_float(execution_costs.get('sell_value'), 0.0):.2f}"
+    )
+    lines.append(
+        f"- slippage_cost: {safe_float(execution_costs.get('slippage_cost'), 0.0):.2f}"
+    )
+    lines.append(
+        f"- commission_cost: {safe_float(execution_costs.get('commission_cost'), 0.0):.2f}"
+    )
+    lines.append(
+        f"- stamp_duty_cost: {safe_float(execution_costs.get('stamp_duty_cost'), 0.0):.2f}"
+    )
+    lines.append(
+        f"- total_execution_cost: {safe_float(execution_costs.get('total_execution_cost'), 0.0):.2f} ({format_pct(safe_float(execution_costs.get('cost_ratio_total_asset'), 0.0))})"
+    )
 
     report_path = run_dir / "portfolio_change_report.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path
+
+
+def estimate_execution_costs(
+    total_asset: float,
+    orders_path: Path,
+    before_df: pd.DataFrame,
+    after_df: pd.DataFrame,
+    settings: Dict[str, float],
+) -> Dict[str, Any]:
+    before_map = {
+        normalize_ticker(r["ticker"]): safe_float(r.get("weight"), 0.0)
+        for _, r in before_df.iterrows()
+    }
+    after_map = {
+        normalize_ticker(r["ticker"]): safe_float(r.get("weight"), 0.0)
+        for _, r in after_df.iterrows()
+    }
+
+    deltas: Dict[str, float] = {}
+    all_tickers = sorted(set(before_map.keys()) | set(after_map.keys()))
+    for t in all_tickers:
+        deltas[t] = after_map.get(t, 0.0) - before_map.get(t, 0.0)
+
+    if orders_path.exists():
+        df = pd.read_csv(orders_path, dtype={"ticker": str})
+        if not df.empty:
+            deltas = {}
+            for _, row in df.iterrows():
+                t = normalize_ticker(row.get("ticker", ""))
+                deltas[t] = safe_float(row.get("delta_weight"), 0.0)
+
+    buy_value = 0.0
+    sell_value = 0.0
+    for _, delta_w in deltas.items():
+        value = abs(delta_w) * total_asset
+        if delta_w > 0:
+            buy_value += value
+        elif delta_w < 0:
+            sell_value += value
+
+    traded_value = buy_value + sell_value
+    slippage_bps = safe_float(settings.get("slippage_bps"), DEFAULT_EXECUTION_SETTINGS["slippage_bps"])
+    commission_rate = safe_float(settings.get("commission_rate"), DEFAULT_EXECUTION_SETTINGS["commission_rate"])
+    stamp_duty_sell_rate = safe_float(
+        settings.get("stamp_duty_sell_rate"), DEFAULT_EXECUTION_SETTINGS["stamp_duty_sell_rate"]
+    )
+
+    slippage_cost = traded_value * slippage_bps / 10000.0
+    commission_cost = traded_value * commission_rate
+    stamp_duty_cost = sell_value * stamp_duty_sell_rate
+    total_cost = slippage_cost + commission_cost + stamp_duty_cost
+    cost_ratio = (total_cost / total_asset) if total_asset > 0 else 0.0
+
+    return {
+        "slippage_bps": slippage_bps,
+        "commission_rate": commission_rate,
+        "stamp_duty_sell_rate": stamp_duty_sell_rate,
+        "buy_value": round(buy_value, 4),
+        "sell_value": round(sell_value, 4),
+        "traded_value": round(traded_value, 4),
+        "slippage_cost": round(slippage_cost, 4),
+        "commission_cost": round(commission_cost, 4),
+        "stamp_duty_cost": round(stamp_duty_cost, 4),
+        "total_execution_cost": round(total_cost, 4),
+        "cost_ratio_total_asset": round(cost_ratio, 8),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -415,6 +516,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--queue-id", default="")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--executor", default="manual_executor")
+    parser.add_argument("--config", default="agent_config.json")
     parser.add_argument("--state-root", default="state")
     parser.add_argument("--runs-root", default="runs")
     parser.add_argument("--timezone-offset-hours", type=int, default=8)
@@ -425,8 +527,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    state_root = Path(args.state_root)
-    runs_root = Path(args.runs_root)
+    cfg = load_runtime_config(Path(args.config))
+    cfg_paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+    cfg_execution = cfg.get("execution", {}) if isinstance(cfg, dict) else {}
+
+    state_root = Path(cfg_paths.get("state_root", args.state_root))
+    runs_root = Path(cfg_paths.get("runs_root", args.runs_root))
     queue_path = state_root / "execution_queue.jsonl"
 
     queue_rows = read_jsonl(queue_path)
@@ -531,6 +637,34 @@ def main() -> int:
     before_positions_df.to_csv(before_snapshot_path, index=False, encoding="utf-8-sig")
     after_positions_df.to_csv(after_snapshot_path, index=False, encoding="utf-8-sig")
 
+    execution_settings = {
+        "slippage_bps": safe_float(
+            cfg_execution.get("slippage_bps"), DEFAULT_EXECUTION_SETTINGS["slippage_bps"]
+        ),
+        "commission_rate": safe_float(
+            cfg_execution.get("commission_rate"), DEFAULT_EXECUTION_SETTINGS["commission_rate"]
+        ),
+        "stamp_duty_sell_rate": safe_float(
+            cfg_execution.get("stamp_duty_sell_rate"),
+            DEFAULT_EXECUTION_SETTINGS["stamp_duty_sell_rate"],
+        ),
+    }
+    execution_costs = estimate_execution_costs(
+        total_asset=total_asset,
+        orders_path=orders_path,
+        before_df=before_positions_df,
+        after_df=after_positions_df,
+        settings=execution_settings,
+    )
+    total_execution_cost = safe_float(execution_costs.get("total_execution_cost"), 0.0)
+    projected_cash_after_cost = max(0.0, cash - total_execution_cost)
+    projected_total_asset_after_cost = stock_asset + projected_cash_after_cost
+    projected_cash_ratio_after_cost = (
+        (projected_cash_after_cost / projected_total_asset_after_cost)
+        if projected_total_asset_after_cost > 0
+        else 1.0
+    )
+
     report_path = generate_portfolio_change_report(
         run_dir=run_dir,
         run_id=run_id,
@@ -541,8 +675,9 @@ def main() -> int:
         before_df=before_positions_df,
         after_df=after_positions_df,
         before_cash_ratio=before_cash_ratio,
-        after_cash_ratio=cash_ratio,
+        after_cash_ratio=projected_cash_ratio_after_cost,
         warnings=warnings,
+        execution_costs=execution_costs,
     )
 
     execution_result = {
@@ -552,6 +687,7 @@ def main() -> int:
         "queue_id": str(queue_item.get("queue_id", "")),
         "executor": args.executor,
         "dry_run": args.dry_run,
+        "before_total_asset": round(total_asset, 4),
         "before_position_count": len(before_positions_df),
         "position_count": len(new_rows),
         "before_cash": round(before_cash, 4),
@@ -562,17 +698,36 @@ def main() -> int:
         "before_snapshot_path": str(before_snapshot_path),
         "after_snapshot_path": str(after_snapshot_path),
         "portfolio_change_report_path": str(report_path),
+        "execution_costs": execution_costs,
+        "estimated_total_execution_cost": round(
+            total_execution_cost, 4
+        ),
+        "projected_cash_after_cost": round(projected_cash_after_cost, 4),
+        "projected_total_asset_after_cost": round(projected_total_asset_after_cost, 4),
+        "projected_cash_ratio_after_cost": round(projected_cash_ratio_after_cost, 6),
         "warnings": warnings,
     }
 
     if not args.dry_run:
+        cash_after_cost = projected_cash_after_cost
+        total_asset_after_cost = projected_total_asset_after_cost
+
+        # Recompute weights using post-cost total asset.
+        for row in new_rows:
+            if total_asset_after_cost > 0:
+                row["weight"] = round(safe_float(row["market_value"], 0.0) / total_asset_after_cost, 6)
+            else:
+                row["weight"] = 0.0
+
         # 1) update positions
         pd.DataFrame(new_rows).to_csv(positions_path, index=False, encoding="utf-8-sig")
 
         # 2) update account snapshot
         account["stock_asset"] = round(stock_asset, 4)
-        account["cash"] = round(cash, 4)
-        account["cash_ratio"] = round(cash_ratio, 6)
+        account["cash"] = round(cash_after_cost, 4)
+        account["total_asset"] = round(total_asset_after_cost, 4)
+        account["cash_ratio"] = round((cash_after_cost / total_asset_after_cost) if total_asset_after_cost > 0 else 1.0, 6)
+        account["last_execution_cost"] = round(total_execution_cost, 4)
         account["updated_at"] = executed_at
         write_json(account_path, account)
 
@@ -587,9 +742,12 @@ def main() -> int:
         proposal["executed_at"] = executed_at
         proposal["executed_by"] = args.executor
         proposal["execution_warnings"] = warnings
+        proposal["execution_costs"] = execution_costs
         write_json(proposal_path, proposal)
 
         # 5) audit artifacts
+        execution_result["cash_after_cost"] = round(cash_after_cost, 4)
+        execution_result["total_asset_after_cost"] = round(total_asset_after_cost, 4)
         result_path = run_dir / "execution_result.json"
         write_json(result_path, execution_result)
         append_jsonl(state_root / "execution_history.jsonl", execution_result)

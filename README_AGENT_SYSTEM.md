@@ -75,3 +75,7 @@ This document describes the first build milestone of the daily investment agent 
 - In non-dry mode, `postclose` attempts to run `step1_screener.py` and `step2_financial_cleaner.py`.
 - If those scripts fail, existing candidate CSV files are still used as fallback when available.
 - `agent_execute.py` writes state mutations only when not using `--dry-run`.
+- Execution cost model is configurable in `agent_config.json`:
+  - `execution.slippage_bps`
+  - `execution.commission_rate`
+  - `execution.stamp_duty_sell_rate`
