@@ -520,6 +520,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-root", default="state")
     parser.add_argument("--runs-root", default="runs")
     parser.add_argument("--timezone-offset-hours", type=int, default=8)
+    parser.add_argument("--force", action="store_true", help="override execution cost guard")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -649,6 +650,7 @@ def main() -> int:
             DEFAULT_EXECUTION_SETTINGS["stamp_duty_sell_rate"],
         ),
     }
+    max_cost_ratio_guard = safe_float(cfg_execution.get("max_cost_ratio_total_asset"), 0.005)
     execution_costs = estimate_execution_costs(
         total_asset=total_asset,
         orders_path=orders_path,
@@ -656,6 +658,17 @@ def main() -> int:
         after_df=after_positions_df,
         settings=execution_settings,
     )
+    cost_ratio = safe_float(execution_costs.get("cost_ratio_total_asset"), 0.0)
+    if cost_ratio > max_cost_ratio_guard and not args.force:
+        raise SystemExit(
+            "execution cost ratio guard blocked: "
+            f"{cost_ratio:.4%} > {max_cost_ratio_guard:.4%}. "
+            "Use --force to override."
+        )
+    if cost_ratio > max_cost_ratio_guard and args.force:
+        warnings.append(
+            f"execution cost ratio exceeds guard but forced: {cost_ratio:.4%} > {max_cost_ratio_guard:.4%}"
+        )
     total_execution_cost = safe_float(execution_costs.get("total_execution_cost"), 0.0)
     projected_cash_after_cost = max(0.0, cash - total_execution_cost)
     projected_total_asset_after_cost = stock_asset + projected_cash_after_cost
@@ -699,6 +712,8 @@ def main() -> int:
         "after_snapshot_path": str(after_snapshot_path),
         "portfolio_change_report_path": str(report_path),
         "execution_costs": execution_costs,
+        "max_cost_ratio_guard": round(max_cost_ratio_guard, 8),
+        "force_override": bool(args.force),
         "estimated_total_execution_cost": round(
             total_execution_cost, 4
         ),

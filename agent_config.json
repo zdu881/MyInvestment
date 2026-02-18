@@ -34,6 +34,7 @@
   "execution": {
     "slippage_bps": 5.0,
     "commission_rate": 0.0003,
-    "stamp_duty_sell_rate": 0.001
+    "stamp_duty_sell_rate": 0.001,
+    "max_cost_ratio_total_asset": 0.005
   }
 }

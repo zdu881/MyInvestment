@@ -30,6 +30,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name`
 - Execution dry-run (do not mutate state):
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run`
+- Force execution when cost guard blocks (use carefully):
+  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force`
 
 ## Scheduling (cron example)
 
@@ -79,3 +81,4 @@ This document describes the first build milestone of the daily investment agent 
   - `execution.slippage_bps`
   - `execution.commission_rate`
   - `execution.stamp_duty_sell_rate`
+  - `execution.max_cost_ratio_total_asset`
