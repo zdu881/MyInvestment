@@ -38,5 +38,10 @@
     "max_cost_ratio_total_asset": 0.005,
     "enforce_constraint_guard": true,
     "constraint_tolerance": 0.001
+  },
+  "maintenance": {
+    "review_stale_hours": 24.0,
+    "execution_stale_hours": 24.0,
+    "retain_days": 14.0
   }
 }

@@ -78,11 +78,43 @@ def run_phase(phase: str, config_path: str, dry_run: bool) -> int:
     return proc.returncode
 
 
+def run_queue_maintenance(cfg: Dict, dry_run: bool) -> int:
+    tz_hours = int(cfg.get("timezone_offset_hours", 8))
+    maintenance_cfg = cfg.get("maintenance", {}) if isinstance(cfg.get("maintenance", {}), dict) else {}
+
+    cmd = [
+        sys.executable,
+        "agent_queue_maintenance.py",
+        "--timezone-offset-hours",
+        str(tz_hours),
+        "--review-stale-hours",
+        str(float(maintenance_cfg.get("review_stale_hours", 24.0))),
+        "--execution-stale-hours",
+        str(float(maintenance_cfg.get("execution_stale_hours", 24.0))),
+        "--retain-days",
+        str(float(maintenance_cfg.get("retain_days", 14.0))),
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    proc = subprocess.run(cmd)
+    return proc.returncode
+
+
+def run_ops_report(days: int) -> int:
+    cmd = [sys.executable, "agent_ops_report.py", "--days", str(days)]
+    proc = subprocess.run(cmd)
+    return proc.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run due phase for agent system")
     parser.add_argument("--config", default="agent_config.json")
     parser.add_argument("--once", action="store_true", help="run at most one due phase")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-maintenance", action="store_true")
+    parser.add_argument("--skip-ops-report", action="store_true")
+    parser.add_argument("--ops-on-idle", action="store_true")
+    parser.add_argument("--ops-days", type=int, default=7)
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -112,29 +144,45 @@ def main() -> int:
         schedule.update(cfg.get("schedule", {}))
 
         due_phase = pick_due_phase(now_local, schedule, executed)
+        phase_executed = False
         if due_phase is None:
             print("[INFO] no due phase")
-            return 0
+        else:
+            ret = run_phase(due_phase, args.config, args.dry_run)
+            if ret != 0:
+                print(f"[ERROR] phase failed: {due_phase}")
+                return ret
 
-        ret = run_phase(due_phase, args.config, args.dry_run)
-        if ret != 0:
-            print(f"[ERROR] phase failed: {due_phase}")
-            return ret
+            executed.append(due_phase)
+            executed = [p for p in ["preopen", "intraday", "postclose"] if p in executed]
 
-        executed.append(due_phase)
-        executed = [p for p in ["preopen", "intraday", "postclose"] if p in executed]
+            write_json(
+                state_path,
+                {
+                    "trading_date": trading_date,
+                    "updated_at": now_local.isoformat(timespec="seconds"),
+                    "executed_phases": executed,
+                    "schedule": schedule,
+                },
+            )
+            phase_executed = True
 
-        write_json(
-            state_path,
-            {
-                "trading_date": trading_date,
-                "updated_at": now_local.isoformat(timespec="seconds"),
-                "executed_phases": executed,
-                "schedule": schedule,
-            },
-        )
+            print(f"[INFO] executed phase: {due_phase}")
 
-        print(f"[INFO] executed phase: {due_phase}")
+        if not args.skip_maintenance:
+            ret = run_queue_maintenance(cfg, args.dry_run)
+            if ret != 0:
+                print("[ERROR] queue maintenance failed")
+                return ret
+            print("[INFO] queue maintenance completed")
+
+        if not args.skip_ops_report and (phase_executed or args.ops_on_idle):
+            ret = run_ops_report(max(1, int(args.ops_days)))
+            if ret != 0:
+                print("[ERROR] ops report generation failed")
+                return ret
+            print("[INFO] ops report refreshed")
+
         return 0
     finally:
         if lock_fd is not None:

@@ -24,6 +24,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_scheduler.py --once`
 - Scheduler once in dry-run:
   - `python3 agent_scheduler.py --once --dry-run`
+- Scheduler once without maintenance/report hooks:
+  - `python3 agent_scheduler.py --once --skip-maintenance --skip-ops-report`
 - Manual review (approve/hold/reject):
   - `python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_name --note "approved after manual check"`
 - Execute approved task and update state:
@@ -43,8 +45,9 @@ This document describes the first build milestone of the daily investment agent 
 
 - Run scheduler every 5 minutes:
   - `*/5 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_scheduler.py --once >> /tmp/myinvestment_scheduler.log 2>&1`
-- Run queue maintenance every hour:
-  - `0 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_queue_maintenance.py >> /tmp/myinvestment_maintenance.log 2>&1`
+- By default scheduler also runs queue maintenance after each trigger and refreshes ops report when a phase is executed.
+- Optional: refresh ops report even when no phase is due:
+  - `*/30 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_scheduler.py --once --ops-on-idle --skip-maintenance >> /tmp/myinvestment_ops.log 2>&1`
 
 ## Core outputs per run
 
@@ -97,6 +100,10 @@ This document describes the first build milestone of the daily investment agent 
 - `agent_ops_report.py` writes summary reports to:
   - `runs/ops/ops_report_latest.md`
   - `runs/ops/ops_report_latest.json`
+- Scheduler hook controls:
+  - `--skip-maintenance`: skip queue stale-mark/archive pass
+  - `--skip-ops-report`: skip ops report refresh
+  - `--ops-on-idle`: refresh ops report even when no phase is due
 - Ops report queue metrics include:
   - `pending_review`, `pending_execution`
   - `stale_review`, `stale_execution`
