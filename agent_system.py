@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
     "paths": {
         "runs_root": "runs",
         "state_root": "state",
+        "knowledge_root": "knowledge",
         "step1_csv": "candidates.csv",
         "step2_csv": "candidates_step2.csv",
     },
@@ -461,6 +462,114 @@ class AgentSystem:
             "verdict": verdict,
             "tool_evidence": tools,
         }
+
+    def _extract_skill_candidates(
+        self, ctx: RunContext, research_rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Build reusable skill candidates from per-ticker research outputs.
+        The first milestone uses deterministic heuristics and stores them
+        as draft candidates for later manual promotion.
+        """
+        rows: List[Dict[str, Any]] = []
+        seen_keys = set()
+
+        for item in research_rows:
+            ticker = normalize_ticker(item.get("ticker"))
+            name = str(item.get("name", "N/A"))
+            confidence = safe_float(item.get("confidence"), 0.0)
+            verdict = str(item.get("verdict", "observe"))
+            risk_flags = list(item.get("risk_flags", []))
+            thesis = list(item.get("thesis", []))
+
+            if verdict == "buy" and confidence >= 0.8 and not risk_flags:
+                key = ("selection_signal", "stable_financial_buy")
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    rows.append(
+                        {
+                            "candidate_id": str(uuid.uuid4()),
+                            "run_id": ctx.run_id,
+                            "trading_date": ctx.trading_date,
+                            "created_at": ctx.as_of_ts,
+                            "title": "Stable Financial Buy Signal",
+                            "pattern_type": "selection_signal",
+                            "applicable_scope": "A-share defensive candidates",
+                            "evidence_count": 1,
+                            "sample_ticker": ticker,
+                            "sample_name": name,
+                            "backtest_hint": "Check 3Y OCF stability + low valuation buckets",
+                            "impact_score": 0.75,
+                            "risk_if_wrong": "Value trap risk when cycle turns",
+                            "promote_recommendation": "draft",
+                            "evidence": {
+                                "confidence": confidence,
+                                "verdict": verdict,
+                                "thesis": thesis[:3],
+                                "risk_flags": risk_flags[:3],
+                            },
+                        }
+                    )
+
+            for flag in risk_flags[:2]:
+                normalized_flag = str(flag).strip()
+                if not normalized_flag:
+                    continue
+                key = ("risk_rule", normalized_flag)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                rows.append(
+                    {
+                        "candidate_id": str(uuid.uuid4()),
+                        "run_id": ctx.run_id,
+                        "trading_date": ctx.trading_date,
+                        "created_at": ctx.as_of_ts,
+                        "title": f"Risk Pattern: {normalized_flag}",
+                        "pattern_type": "risk_rule",
+                        "applicable_scope": "Portfolio monitoring and screening",
+                        "evidence_count": 1,
+                        "sample_ticker": ticker,
+                        "sample_name": name,
+                        "backtest_hint": "Validate false-positive rate in 12M rolling windows",
+                        "impact_score": 0.6 if verdict == "observe" else 0.7,
+                        "risk_if_wrong": "May over-filter opportunities",
+                        "promote_recommendation": "draft",
+                        "evidence": {
+                            "confidence": confidence,
+                            "verdict": verdict,
+                            "thesis": thesis[:3],
+                            "risk_flags": risk_flags[:3],
+                        },
+                    }
+                )
+
+        return rows
+
+    def _persist_skill_candidates(
+        self, ctx: RunContext, skill_candidates: List[Dict[str, Any]]
+    ) -> Optional[Path]:
+        if not skill_candidates:
+            return None
+
+        run_skill_path = ctx.run_dir / "skill_candidates.jsonl"
+        write_jsonl(run_skill_path, skill_candidates)
+
+        knowledge_root = Path(self.paths.get("knowledge_root", "knowledge"))
+        global_skill_path = knowledge_root / "skill_candidates.jsonl"
+        for row in skill_candidates:
+            append_jsonl(global_skill_path, row)
+
+        # Initialize registry once if it does not exist.
+        registry_path = knowledge_root / "skills_registry.csv"
+        if not registry_path.exists():
+            registry_path.parent.mkdir(parents=True, exist_ok=True)
+            registry_path.write_text(
+                "skill_name,version,status,created_from_run,last_validated_at,owner,rollback_version\n",
+                encoding="utf-8",
+            )
+
+        return run_skill_path
 
     def _build_target_weights(
         self,
@@ -893,11 +1002,27 @@ class AgentSystem:
             "constraint_violations": violations,
             "gate_failures": gate_failures,
             "decision": decision,
+            "review_status": "pending_manual_review",
         }
 
         proposal_path = ctx.run_dir / "allocation_proposal.json"
         write_json(proposal_path, proposal)
         artifacts.append(str(proposal_path))
+
+        review_request = {
+            "timestamp": ctx.as_of_ts,
+            "run_id": ctx.run_id,
+            "proposal_id": proposal["proposal_id"],
+            "status": "pending",
+            "suggested_decision": decision,
+            "required_action": "manual_review",
+            "advice_report_path": str(ctx.run_dir / "advice_report.md"),
+            "proposal_path": str(proposal_path),
+        }
+        review_request_path = ctx.run_dir / "review_request.json"
+        write_json(review_request_path, review_request)
+        artifacts.append(str(review_request_path))
+        append_jsonl(Path(self.paths["state_root"]) / "review_queue.jsonl", review_request)
 
         gate_result = {
             "hard_risk_block": hard_risk_block,
@@ -937,6 +1062,11 @@ class AgentSystem:
             proposal=proposal,
         )
         artifacts.append(str(advice_path))
+
+        skill_candidates = self._extract_skill_candidates(ctx, research_rows)
+        run_skill_path = self._persist_skill_candidates(ctx, skill_candidates)
+        if run_skill_path is not None:
+            artifacts.append(str(run_skill_path))
 
         return artifacts
 

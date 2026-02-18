@@ -3,6 +3,7 @@
   "paths": {
     "runs_root": "runs",
     "state_root": "state",
+    "knowledge_root": "knowledge",
     "step1_csv": "candidates.csv",
     "step2_csv": "candidates_step2.csv"
   },

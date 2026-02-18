@@ -24,6 +24,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_scheduler.py --once`
 - Scheduler once in dry-run:
   - `python3 agent_scheduler.py --once --dry-run`
+- Manual review (approve/hold/reject):
+  - `python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_name --note "approved after manual check"`
 
 ## Scheduling (cron example)
 
@@ -41,6 +43,8 @@ This document describes the first build milestone of the daily investment agent 
 - `allocation_proposal.json`: target portfolio and gate results.
 - `rebalance_actions.csv`: action table (`BUY/SELL/INCREASE/DECREASE/HOLD`).
 - `decision_log.jsonl`: run-level decision log.
+- `review_request.json`: pending manual review payload.
+- `skill_candidates.jsonl`: run-level skill discovery candidates.
 - `advice_report.md`: human-review proposal report.
 
 ## Manual review policy
@@ -48,6 +52,13 @@ This document describes the first build milestone of the daily investment agent 
 - The runtime only generates proposals.
 - Every action is marked for manual review.
 - Use `advice_report.md` and gate results before any execution.
+- Use `agent_review.py` to finalize `approve/hold/reject`.
+
+## Skill accumulation
+
+- Run-level skill candidates are generated in `runs/.../skill_candidates.jsonl`.
+- Global skill candidate pool is appended to `knowledge/skill_candidates.jsonl`.
+- Initial registry scaffold is created at `knowledge/skills_registry.csv`.
 
 ## Notes
 
