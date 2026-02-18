@@ -7,6 +7,10 @@ state/review_history.jsonl
 state/execution_queue.jsonl
 state/execution_history.jsonl
 state/maintenance_last_run.json
+state/model_feedback.json
+state/proposal_quality_history.jsonl
 state/archive/
 knowledge/skill_candidates.jsonl
+knowledge/skills_registry_history.jsonl
+knowledge/skill_promotion_last_run.json
 runs/scheduler.lock

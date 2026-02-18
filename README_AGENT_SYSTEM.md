@@ -26,6 +26,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_scheduler.py --once --dry-run`
 - Scheduler once without maintenance/report hooks:
   - `python3 agent_scheduler.py --once --skip-maintenance --skip-ops-report`
+- Scheduler once without feedback/skill promotion hooks:
+  - `python3 agent_scheduler.py --once --skip-feedback --skip-skill-promotion`
 - Manual review (approve/hold/reject):
   - `python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_name --note "approved after manual check"`
 - Execute approved task and update state:
@@ -40,12 +42,16 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_queue_maintenance.py --dry-run`
 - Queue maintenance apply:
   - `python3 agent_queue_maintenance.py`
+- Generate proposal quality feedback and next-round thresholds:
+  - `python3 agent_feedback.py --days 30`
+- Promote high-quality skill candidates into versioned registry:
+  - `python3 agent_skill_manager.py`
 
 ## Scheduling (cron example)
 
 - Run scheduler every 5 minutes:
   - `*/5 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_scheduler.py --once >> /tmp/myinvestment_scheduler.log 2>&1`
-- By default scheduler also runs queue maintenance after each trigger and refreshes ops report when a phase is executed.
+- By default scheduler runs queue maintenance + proposal quality feedback + skill promotion after each trigger, and refreshes ops report when a phase is executed.
 - Optional: refresh ops report even when no phase is due:
   - `*/30 * * * * cd /data/home/sim6g/MyInvestment && /usr/bin/python3 agent_scheduler.py --once --ops-on-idle --skip-maintenance >> /tmp/myinvestment_ops.log 2>&1`
 
@@ -64,6 +70,7 @@ This document describes the first build milestone of the daily investment agent 
 - `skill_candidates.jsonl`: run-level skill discovery candidates.
 - `execution_orders.csv`: queued execution orders generated after approved rebalance.
 - `execution_result.json`: execution outcome and state update summary.
+- `runs/ops/proposal_quality_latest.md` and `runs/ops/proposal_quality_latest.json`: proposal quality scoring snapshots.
 - `portfolio_change_report.md`: before/after portfolio and risk exposure diff report.
 - `portfolio_before_snapshot.csv` and `portfolio_after_snapshot.csv`: execution snapshots.
 - `advice_report.md`: human-review proposal report.
@@ -80,7 +87,15 @@ This document describes the first build milestone of the daily investment agent 
 
 - Run-level skill candidates are generated in `runs/.../skill_candidates.jsonl`.
 - Global skill candidate pool is appended to `knowledge/skill_candidates.jsonl`.
-- Initial registry scaffold is created at `knowledge/skills_registry.csv`.
+- Auto-promotion writes versioned skills to `knowledge/skills_registry.csv`.
+- Promotion history is tracked in `knowledge/skills_registry_history.jsonl`.
+
+## Quality feedback loop
+
+- `agent_feedback.py` reads `state/execution_history.jsonl` and per-run artifacts to score proposal quality.
+- Quality history is persisted in `state/proposal_quality_history.jsonl`.
+- Next-round selection feedback is persisted in `state/model_feedback.json`.
+- `agent_system.py` applies `min_confidence_buy`, `max_new_positions_override`, and penalty maps from `state/model_feedback.json` during target weight construction.
 
 ## Notes
 
@@ -103,6 +118,8 @@ This document describes the first build milestone of the daily investment agent 
 - Scheduler hook controls:
   - `--skip-maintenance`: skip queue stale-mark/archive pass
   - `--skip-ops-report`: skip ops report refresh
+  - `--skip-feedback`: skip proposal quality scoring / feedback refresh
+  - `--skip-skill-promotion`: skip auto skill promotion refresh
   - `--ops-on-idle`: refresh ops report even when no phase is due
 - Ops report queue metrics include:
   - `pending_review`, `pending_execution`

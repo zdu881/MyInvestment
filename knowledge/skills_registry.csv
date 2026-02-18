@@ -1,1 +1,1 @@
-skill_name,version,status,created_from_run,last_validated_at,owner,rollback_version
+skill_name,skill_key,pattern_type,title,version,status,created_from_run,last_validated_at,owner,rollback_version,quality_score,evidence_count

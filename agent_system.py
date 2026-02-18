@@ -65,6 +65,9 @@ DEFAULT_CONFIG = {
         "intraday_loss_alert_pct": -5.0,
         "intraday_profit_alert_pct": 8.0,
     },
+    "feedback": {
+        "default_min_confidence_buy": 0.6,
+    },
 }
 
 
@@ -125,6 +128,15 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         if text in {"", "-", "--", "None", "nan", "NaN"}:
             return default
         return float(text)
+    except Exception:
+        return default
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(str(value).strip())
     except Exception:
         return default
 
@@ -226,6 +238,16 @@ class AgentSystem:
             ),
             "risk_profile": str(account.get("risk_profile", "defensive")),
         }
+
+    def _load_model_feedback(self) -> Dict[str, Any]:
+        """
+        Optional closed-loop feedback generated from recent proposal/execution quality.
+        """
+        state_root = Path(self.paths["state_root"])
+        payload = load_json(state_root / "model_feedback.json", default={})
+        if not isinstance(payload, dict):
+            return {}
+        return payload
 
     def _run_script(self, script_name: str, log_path: Path) -> None:
         cmd = [sys.executable, script_name]
@@ -565,7 +587,7 @@ class AgentSystem:
         if not registry_path.exists():
             registry_path.parent.mkdir(parents=True, exist_ok=True)
             registry_path.write_text(
-                "skill_name,version,status,created_from_run,last_validated_at,owner,rollback_version\n",
+                "skill_name,skill_key,pattern_type,title,version,status,created_from_run,last_validated_at,owner,rollback_version,quality_score,evidence_count\n",
                 encoding="utf-8",
             )
 
@@ -577,10 +599,31 @@ class AgentSystem:
         candidate_df: pd.DataFrame,
         research_rows: List[Dict[str, Any]],
         account: Dict[str, Any],
-    ) -> Dict[str, float]:
+    ) -> Tuple[Dict[str, float], Dict[str, Any]]:
+        feedback = self._load_model_feedback()
+        feedback_cfg = self.config.get("feedback", {})
+        min_confidence_buy = safe_float(
+            feedback.get("min_confidence_buy"),
+            safe_float(feedback_cfg.get("default_min_confidence_buy"), 0.6),
+        )
+        ticker_penalties_raw = feedback.get("ticker_penalties", {})
+        risk_flag_penalties_raw = feedback.get("risk_flag_penalties", {})
+        ticker_penalties = (
+            {normalize_ticker(k): safe_float(v, 0.0) for k, v in ticker_penalties_raw.items()}
+            if isinstance(ticker_penalties_raw, dict)
+            else {}
+        )
+        risk_flag_penalties = (
+            {str(k): safe_float(v, 0.0) for k, v in risk_flag_penalties_raw.items()}
+            if isinstance(risk_flag_penalties_raw, dict)
+            else {}
+        )
+
         max_single = safe_float(account.get("max_single_weight"), 0.3)
         min_cash = safe_float(account.get("min_cash_ratio"), 0.1)
-        max_positions = int(self.config.get("postclose", {}).get("max_new_positions", 3))
+        cfg_max_positions = int(self.config.get("postclose", {}).get("max_new_positions", 3))
+        feedback_max_positions = safe_int(feedback.get("max_new_positions_override"), 0)
+        max_positions = feedback_max_positions if feedback_max_positions > 0 else cfg_max_positions
         investable = max(0.0, 1.0 - min_cash)
 
         scored: List[Tuple[str, float]] = []
@@ -596,28 +639,53 @@ class AgentSystem:
         else:
             score_map = {}
 
+        low_confidence_filtered = 0
         for item in research_rows:
-            if item.get("verdict") == "buy":
-                t = normalize_ticker(item["ticker"])
-                scored.append((t, score_map.get(t, 0.0) + item.get("confidence", 0.0)))
+            if item.get("verdict") != "buy":
+                continue
+            confidence = safe_float(item.get("confidence"), 0.0)
+            if confidence < min_confidence_buy:
+                low_confidence_filtered += 1
+                continue
+            t = normalize_ticker(item["ticker"])
+            ticker_penalty = safe_float(ticker_penalties.get(t), 0.0)
+            risk_penalty = 0.0
+            for flag in list(item.get("risk_flags", [])):
+                risk_penalty += safe_float(risk_flag_penalties.get(str(flag), 0.0), 0.0)
+            score = score_map.get(t, 0.0) + confidence - ticker_penalty - risk_penalty
+            scored.append((t, score))
 
         scored = sorted(scored, key=lambda x: x[1], reverse=True)
-        selected = [t for t, _ in scored[:max_positions]]
+        selected = [t for t, score in scored if score > 0][:max_positions]
+
+        feedback_context = {
+            "generated_at": str(feedback.get("generated_at", "")),
+            "average_quality_score": round(safe_float(feedback.get("average_quality_score"), 0.0), 4),
+            "quality_sample_size": safe_int(feedback.get("quality_sample_size"), 0),
+            "min_confidence_buy": round(min_confidence_buy, 4),
+            "max_new_positions_config": cfg_max_positions,
+            "max_new_positions_applied": max_positions,
+            "ticker_penalty_count": len(ticker_penalties),
+            "risk_flag_penalty_count": len(risk_flag_penalties),
+            "buy_candidates_considered": len(scored),
+            "buy_candidates_filtered_by_confidence": low_confidence_filtered,
+            "selected_count": len(selected),
+        }
 
         target: Dict[str, float] = {}
         if selected:
             equal_w = min(max_single, investable / len(selected))
             for ticker in selected:
                 target[ticker] = round(equal_w, 4)
-            return target
+            return target, feedback_context
 
         # Fallback: keep existing top holdings if no buy candidates.
         if positions.empty:
-            return target
+            return target, feedback_context
 
         keep = positions.sort_values(by="weight", ascending=False).head(max_positions)
         if keep.empty:
-            return target
+            return target, feedback_context
 
         total_keep = keep["weight"].sum()
         if total_keep <= 0:
@@ -630,7 +698,7 @@ class AgentSystem:
                 w = min(max_single, safe_float(row.get("weight"), 0.0) * scale)
                 target[normalize_ticker(row["ticker"])] = round(w, 4)
 
-        return target
+        return target, feedback_context
 
     def _industry_map(self, positions: pd.DataFrame, candidate_df: pd.DataFrame) -> Dict[str, str]:
         out: Dict[str, str] = {}
@@ -834,6 +902,20 @@ class AgentSystem:
         lines.append(f"- actionable_count: {gate_result.get('actionable_count', 0)}")
         lines.append("")
 
+        lines.append("## 反馈调节")
+        lines.append("")
+        feedback_ctx = proposal.get("feedback_context", {}) if isinstance(proposal, dict) else {}
+        lines.append(
+            f"- feedback_generated_at: {feedback_ctx.get('generated_at', 'N/A')} | avg_quality={safe_float(feedback_ctx.get('average_quality_score'), 0.0):.2f} | sample_size={safe_int(feedback_ctx.get('quality_sample_size'), 0)}"
+        )
+        lines.append(
+            f"- min_confidence_buy: {safe_float(feedback_ctx.get('min_confidence_buy'), 0.0):.2f} | max_new_positions: {safe_int(feedback_ctx.get('max_new_positions_applied'), 0)}"
+        )
+        lines.append(
+            f"- candidates_considered: {safe_int(feedback_ctx.get('buy_candidates_considered'), 0)} | filtered_by_confidence: {safe_int(feedback_ctx.get('buy_candidates_filtered_by_confidence'), 0)} | selected: {safe_int(feedback_ctx.get('selected_count'), 0)}"
+        )
+        lines.append("")
+
         lines.append("## 执行约束")
         lines.append("")
         lines.append("- 本建议需人工审批后执行。")
@@ -908,7 +990,9 @@ class AgentSystem:
 
         positions = self._load_positions()
         account = self._load_account()
-        target_weights = self._build_target_weights(positions, candidate_df, research_rows, account)
+        target_weights, feedback_context = self._build_target_weights(
+            positions, candidate_df, research_rows, account
+        )
 
         industry_map = self._industry_map(positions, candidate_df)
         violations = self._evaluate_constraints(target_weights, industry_map, account)
@@ -1001,6 +1085,7 @@ class AgentSystem:
             "evidence_completeness": round(float(evidence_completeness), 4),
             "constraint_violations": violations,
             "gate_failures": gate_failures,
+            "feedback_context": feedback_context,
             "decision": decision,
             "review_status": "pending_manual_review",
         }

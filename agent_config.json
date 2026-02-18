@@ -43,5 +43,15 @@
     "review_stale_hours": 24.0,
     "execution_stale_hours": 24.0,
     "retain_days": 14.0
+  },
+  "feedback": {
+    "quality_window_days": 30,
+    "default_min_confidence_buy": 0.6
+  },
+  "skill_promotion": {
+    "min_occurrences": 3,
+    "quality_threshold": 0.62,
+    "promote_delta": 0.08,
+    "owner": "auto_agent"
   }
 }

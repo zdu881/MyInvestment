@@ -106,6 +106,51 @@ def run_ops_report(days: int) -> int:
     return proc.returncode
 
 
+def run_quality_feedback(cfg: Dict, days: int, dry_run: bool) -> int:
+    paths = cfg.get("paths", {}) if isinstance(cfg.get("paths", {}), dict) else {}
+    cmd = [
+        sys.executable,
+        "agent_feedback.py",
+        "--days",
+        str(max(1, int(days))),
+        "--runs-root",
+        str(paths.get("runs_root", "runs")),
+        "--state-root",
+        str(paths.get("state_root", "state")),
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    proc = subprocess.run(cmd)
+    return proc.returncode
+
+
+def run_skill_promotion(cfg: Dict, dry_run: bool) -> int:
+    paths = cfg.get("paths", {}) if isinstance(cfg.get("paths", {}), dict) else {}
+    promote_cfg = (
+        cfg.get("skill_promotion", {})
+        if isinstance(cfg.get("skill_promotion", {}), dict)
+        else {}
+    )
+    cmd = [
+        sys.executable,
+        "agent_skill_manager.py",
+        "--knowledge-root",
+        str(paths.get("knowledge_root", "knowledge")),
+        "--min-occurrences",
+        str(int(promote_cfg.get("min_occurrences", 3))),
+        "--quality-threshold",
+        str(float(promote_cfg.get("quality_threshold", 0.62))),
+        "--promote-delta",
+        str(float(promote_cfg.get("promote_delta", 0.08))),
+        "--owner",
+        str(promote_cfg.get("owner", "auto_agent")),
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    proc = subprocess.run(cmd)
+    return proc.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run due phase for agent system")
     parser.add_argument("--config", default="agent_config.json")
@@ -113,8 +158,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-maintenance", action="store_true")
     parser.add_argument("--skip-ops-report", action="store_true")
+    parser.add_argument("--skip-feedback", action="store_true")
+    parser.add_argument("--skip-skill-promotion", action="store_true")
     parser.add_argument("--ops-on-idle", action="store_true")
     parser.add_argument("--ops-days", type=int, default=7)
+    parser.add_argument("--feedback-days", type=int, default=30)
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -175,6 +223,22 @@ def main() -> int:
                 print("[ERROR] queue maintenance failed")
                 return ret
             print("[INFO] queue maintenance completed")
+
+        if not args.skip_feedback:
+            feedback_cfg = cfg.get("feedback", {}) if isinstance(cfg.get("feedback", {}), dict) else {}
+            feedback_days = int(feedback_cfg.get("quality_window_days", args.feedback_days))
+            ret = run_quality_feedback(cfg, feedback_days, args.dry_run)
+            if ret != 0:
+                print("[ERROR] quality feedback generation failed")
+                return ret
+            print("[INFO] quality feedback refreshed")
+
+        if not args.skip_skill_promotion:
+            ret = run_skill_promotion(cfg, args.dry_run)
+            if ret != 0:
+                print("[ERROR] skill promotion failed")
+                return ret
+            print("[INFO] skill promotion refreshed")
 
         if not args.skip_ops_report and (phase_executed or args.ops_on_idle):
             ret = run_ops_report(max(1, int(args.ops_days)))
