@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MyInvestment Control Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb bg-orb-a"></div>
+    <div class="bg-orb bg-orb-b"></div>
+
+    <header class="topbar">
+      <div>
+        <h1 data-i18n="header.title">MyInvestment Console</h1>
+        <p data-i18n="header.subtitle">运营控制台 + 审核执行台</p>
+      </div>
+      <div class="token-bar">
+        <div class="lang-switch">
+          <label for="languageSelect" data-i18n="header.language">语言</label>
+          <select id="languageSelect">
+            <option value="zh-CN" data-i18n="lang.zh">中文</option>
+            <option value="en-US" data-i18n="lang.en">English</option>
+          </select>
+        </div>
+        <input id="apiTokenInput" type="password" placeholder="可选 API Token" data-i18n-placeholder="token.placeholder" />
+        <button id="saveTokenBtn" class="btn ghost" data-i18n="token.save">保存 Token</button>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-view="action-center" data-i18n="tab.actionCenter">Action Center</button>
+      <button class="tab" data-view="proposal-review" data-i18n="tab.proposalReview">Proposal Review</button>
+      <button class="tab" data-view="execution-queue" data-i18n="tab.executionQueue">Execution Queue</button>
+      <button class="tab" data-view="runs" data-i18n="tab.runs">Runs</button>
+      <button class="tab" data-view="alerts-ops" data-i18n="tab.alertsOps">Alerts & Ops</button>
+      <button class="tab" data-view="quality" data-i18n="tab.quality">Quality Feedback</button>
+      <button class="tab" data-view="config" data-i18n="tab.config">State & Config</button>
+    </nav>
+
+    <main>
+      <section class="view active" id="view-action-center">
+        <div class="section-head">
+          <h2 data-i18n="tab.actionCenter">Action Center</h2>
+          <button class="btn" id="refreshActionCenterBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <div class="kpi-grid" id="kpiGrid"></div>
+        <div class="panel-grid">
+          <article class="panel">
+            <h3 data-i18n="actionCenter.priorityAlerts">Priority Alerts</h3>
+            <div id="acAlerts"></div>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="actionCenter.pendingManualReviews">Pending Manual Reviews</h3>
+            <div id="acReviews"></div>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="actionCenter.pendingExecutions">Pending Executions</h3>
+            <div id="acExecutions"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-proposal-review">
+        <div class="section-head">
+          <h2 data-i18n="tab.proposalReview">Proposal Review</h2>
+          <button class="btn" id="refreshProposalBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <div class="split-3">
+          <article class="panel">
+            <h3 data-i18n="proposal.pendingProposals">Pending Proposals</h3>
+            <div id="proposalList"></div>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="proposal.adviceReport">Advice Report</h3>
+            <pre id="proposalAdvice" class="markdown-box"></pre>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="proposal.detailAction">Detail & Action</h3>
+            <div id="proposalDetail"></div>
+            <form id="reviewForm" class="form-card">
+              <input type="hidden" id="reviewRunId" />
+              <label><span data-i18n="proposal.decision">Decision</span>
+                <select id="reviewDecision">
+                  <option value="approve" data-i18n="decision.approve">approve</option>
+                  <option value="hold" data-i18n="decision.hold">hold</option>
+                  <option value="reject" data-i18n="decision.reject">reject</option>
+                </select>
+              </label>
+              <label><span data-i18n="proposal.reviewer">Reviewer</span>
+                <input id="reviewerInput" placeholder="your_name" data-i18n-placeholder="proposal.reviewerPlaceholder" />
+              </label>
+              <label><span data-i18n="proposal.note">Note</span>
+                <textarea id="reviewNote" rows="3" placeholder="review note" data-i18n-placeholder="proposal.notePlaceholder"></textarea>
+              </label>
+              <button type="submit" class="btn danger" data-i18n="proposal.submitReview">提交审核</button>
+            </form>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-execution-queue">
+        <div class="section-head">
+          <h2 data-i18n="tab.executionQueue">Execution Queue</h2>
+          <button class="btn" id="refreshExecutionBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <div class="split-2">
+          <article class="panel">
+            <h3 data-i18n="execution.pendingQueue">Pending Queue</h3>
+            <div id="executionList"></div>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="execution.detail">Execution Detail</h3>
+            <div id="executionDetail"></div>
+            <form id="executeForm" class="form-card">
+              <input type="hidden" id="executeRunId" />
+              <label><span data-i18n="execution.executor">Executor</span>
+                <input id="executorInput" placeholder="your_name" data-i18n-placeholder="execution.executorPlaceholder" />
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="executeDryRun" checked />
+                <span data-i18n="execution.dryRun">dry-run</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="executeForce" />
+                <span data-i18n="execution.force">force</span>
+              </label>
+              <button type="submit" class="btn danger" data-i18n="execution.submit">执行任务</button>
+            </form>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-runs">
+        <div class="section-head">
+          <h2 data-i18n="tab.runs">Runs</h2>
+          <button class="btn" id="refreshRunsBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <div class="split-3">
+          <article class="panel">
+            <h3 data-i18n="runs.list">Run List</h3>
+            <div id="runsList"></div>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="runs.manifest">Run Manifest</h3>
+            <pre id="runManifest" class="code-box"></pre>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="runs.artifacts">Artifacts</h3>
+            <div id="artifactList"></div>
+            <pre id="artifactContent" class="code-box"></pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-alerts-ops">
+        <div class="section-head">
+          <h2 data-i18n="tab.alertsOps">Alerts & Ops</h2>
+          <button class="btn" id="refreshOpsBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <div class="split-2">
+          <article class="panel">
+            <h3 data-i18n="alerts.alerts">Alerts</h3>
+            <div id="alertsSummary"></div>
+            <h3 data-i18n="alerts.recentEvents">Recent Events</h3>
+            <div id="alertsEvents"></div>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="alerts.opsReport">Ops Report</h3>
+            <pre id="opsReport" class="code-box"></pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-quality">
+        <div class="section-head">
+          <h2 data-i18n="tab.quality">Quality Feedback</h2>
+          <button class="btn" id="refreshQualityBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <div class="split-2">
+          <article class="panel">
+            <h3 data-i18n="quality.summary">Summary</h3>
+            <pre id="qualitySummary" class="code-box"></pre>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="quality.lowCases">Low Quality Cases</h3>
+            <div id="qualityCases"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-config">
+        <div class="section-head">
+          <h2 data-i18n="tab.config">State & Config</h2>
+          <button class="btn" id="refreshConfigBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <div class="split-2">
+          <article class="panel">
+            <h3 data-i18n="config.currentConfig">Current Config</h3>
+            <pre id="configView" class="code-box"></pre>
+          </article>
+          <article class="panel">
+            <h3 data-i18n="config.configPatch">Config Patch</h3>
+            <form id="configPatchForm" class="form-card">
+              <label><span data-i18n="config.jsonPatch">JSON Patch</span>
+                <textarea id="configPatchInput" rows="10" placeholder='{"action_center":{"max_alerts":6}}'></textarea>
+              </label>
+              <button type="submit" class="btn danger" data-i18n="config.applyPatch">应用配置</button>
+            </form>
+            <h3 data-i18n="config.schedulerOnce">Scheduler Once</h3>
+            <form id="schedulerForm" class="form-card">
+              <label class="checkbox-row">
+                <input type="checkbox" id="schedulerDryRun" checked />
+                <span data-i18n="execution.dryRun">dry-run</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="schedulerSkipMaintenance" />
+                <span data-i18n="config.skipMaintenance">skip-maintenance</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="schedulerSkipAlerts" />
+                <span data-i18n="config.skipAlerts">skip-alerts</span>
+              </label>
+              <button type="submit" class="btn" data-i18n="config.triggerScheduler">触发 Scheduler Once</button>
+            </form>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

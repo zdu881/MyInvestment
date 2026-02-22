@@ -52,6 +52,12 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_alerts.py`
 - Refresh operations action center:
   - `python3 agent_action_center.py`
+- Start integrated WebUI + API console:
+  - `./scripts/start_webui.sh`
+- Run WebUI/API acceptance tests:
+  - `./scripts/run_tests.sh`
+- Run optional browser E2E (language switch):
+  - `./scripts/run_webui_e2e.sh`
 
 ## Scheduling (cron example)
 

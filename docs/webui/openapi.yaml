@@ -1,0 +1,1098 @@
+openapi: 3.1.0
+info:
+  title: MyInvestment Web API
+  version: 0.1.0
+  description: |
+    Thin API layer for MyInvestment agent runtime.
+    - Read-only data aggregation from runs/state/knowledge files.
+    - Controlled command execution for review/execute/scheduler actions.
+servers:
+  - url: http://localhost:8787
+    description: local dev
+
+tags:
+  - name: Health
+  - name: ActionCenter
+  - name: Ops
+  - name: Alerts
+  - name: Runs
+  - name: Proposals
+  - name: Reviews
+  - name: Executions
+  - name: Scheduler
+  - name: Config
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, server_time]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  server_time:
+                    type: string
+                    format: date-time
+
+  /api/action-center:
+    get:
+      tags: [ActionCenter]
+      summary: Get latest action center summary
+      operationId: getActionCenter
+      responses:
+        '200':
+          description: latest action center
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionCenter'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ops/report:
+    get:
+      tags: [Ops]
+      summary: Get latest ops health report
+      operationId: getOpsReport
+      responses:
+        '200':
+          description: latest ops report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsReport'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/alerts:
+    get:
+      tags: [Alerts]
+      summary: Get latest alert summary
+      operationId: getAlerts
+      responses:
+        '200':
+          description: latest alerts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSummary'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/alerts/events:
+    get:
+      tags: [Alerts]
+      summary: List recent alert transition events
+      operationId: getAlertEvents
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: alert events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AlertEvent'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/quality/latest:
+    get:
+      tags: [Ops]
+      summary: Get latest proposal quality report
+      operationId: getQualityLatest
+      responses:
+        '200':
+          description: latest proposal quality
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalQualitySummary'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/runs:
+    get:
+      tags: [Runs]
+      summary: List runs by optional filters
+      operationId: listRuns
+      parameters:
+        - in: query
+          name: trading_date
+          schema:
+            type: string
+            format: date
+          description: YYYY-MM-DD
+        - in: query
+          name: phase
+          schema:
+            type: string
+            enum: [preopen, intraday, postclose, all]
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [success, failed]
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: run list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunManifestLite'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/runs/{runId}:
+    get:
+      tags: [Runs]
+      summary: Get one run manifest and metadata
+      operationId: getRun
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: run detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/runs/{runId}/artifacts:
+    get:
+      tags: [Runs]
+      summary: List artifacts for one run
+      operationId: listRunArtifacts
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: artifact list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ArtifactItem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/runs/{runId}/artifact-content:
+    get:
+      tags: [Runs]
+      summary: Read one artifact content (safe allowlist)
+      operationId: getArtifactContent
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - in: query
+          name: artifact
+          required: true
+          schema:
+            type: string
+          description: relative artifact file name inside the run dir
+      responses:
+        '200':
+          description: artifact content
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [artifact, kind, content]
+                properties:
+                  artifact:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [json, jsonl, csv, markdown, text]
+                  content:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/proposals/pending:
+    get:
+      tags: [Proposals]
+      summary: List pending proposals from review queue
+      operationId: listPendingProposals
+      responses:
+        '200':
+          description: pending proposal items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReviewQueueItem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/proposals/{runId}:
+    get:
+      tags: [Proposals]
+      summary: Get proposal detail bundle for one run
+      operationId: getProposalByRun
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: proposal detail bundle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProposalDetailBundle'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/reviews/{runId}:
+    post:
+      tags: [Reviews]
+      summary: Submit review decision for proposal
+      operationId: submitReview
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewSubmitRequest'
+      responses:
+        '200':
+          description: review command executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: proposal is not pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/executions/pending:
+    get:
+      tags: [Executions]
+      summary: List pending execution queue items
+      operationId: listPendingExecutions
+      responses:
+        '200':
+          description: pending execution queue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExecutionQueueItem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/executions/{runId}:
+    post:
+      tags: [Executions]
+      summary: Execute one approved queue item by run id
+      operationId: executeRun
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecutionSubmitRequest'
+      responses:
+        '200':
+          description: execution command executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: queue item not pending or proposal not approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/scheduler/once:
+    post:
+      tags: [Scheduler]
+      summary: Trigger scheduler once
+      operationId: runSchedulerOnce
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SchedulerOnceRequest'
+      responses:
+        '200':
+          description: scheduler command executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/config:
+    get:
+      tags: [Config]
+      summary: Get current runtime config
+      operationId: getConfig
+      responses:
+        '200':
+          description: current config
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      tags: [Config]
+      summary: Patch runtime config (admin only)
+      operationId: patchConfig
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: config updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    RunId:
+      in: path
+      name: runId
+      required: true
+      schema:
+        type: string
+      description: UUID style run id from run_manifest.json
+
+  responses:
+    BadRequest:
+      description: bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: internal error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+        message:
+          type: string
+        details:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: string
+
+    ActionResponse:
+      type: object
+      required: [ok, command, exit_code]
+      properties:
+        ok:
+          type: boolean
+        command:
+          type: array
+          items:
+            type: string
+        exit_code:
+          type: integer
+        stdout_tail:
+          type: string
+        stderr_tail:
+          type: string
+        affected_run_id:
+          type: string
+
+    AlertItem:
+      type: object
+      required: [check_id, level, message]
+      properties:
+        check_id:
+          type: string
+        level:
+          type: string
+          enum: [warn, critical]
+        value:
+          oneOf:
+            - type: number
+            - type: integer
+            - type: string
+            - type: 'null'
+        message:
+          type: string
+        source:
+          type: string
+
+    AlertEvent:
+      type: object
+      required: [timestamp, event, check_id, level, message]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        event:
+          type: string
+          enum: [opened, escalated, deescalated, resolved, reminder]
+        check_id:
+          type: string
+        level:
+          type: string
+          enum: [warn, critical]
+        value:
+          oneOf:
+            - type: number
+            - type: integer
+            - type: string
+            - type: 'null'
+        message:
+          type: string
+        source:
+          type: string
+
+    AlertSummary:
+      type: object
+      required:
+        - generated_at
+        - status
+        - active_alert_count
+        - active_critical_count
+        - active_warn_count
+        - active_alerts
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [ok, warn, critical]
+        active_alert_count:
+          type: integer
+        active_critical_count:
+          type: integer
+        active_warn_count:
+          type: integer
+        active_alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertItem'
+        event_count:
+          type: integer
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertEvent'
+
+    ActionCenterOverview:
+      type: object
+      required:
+        - health_score
+        - health_label
+        - alert_status
+        - active_alert_count
+        - pending_review_count
+        - pending_execution_count
+      properties:
+        health_score:
+          type: number
+        health_label:
+          type: string
+          enum: [healthy, watch, risk]
+        alert_status:
+          type: string
+          enum: [ok, warn, critical, unknown]
+        active_alert_count:
+          type: integer
+        pending_review_count:
+          type: integer
+        pending_execution_count:
+          type: integer
+        quality_sample_size:
+          type: integer
+        quality_avg_score:
+          type: number
+
+    ReviewQueueItem:
+      type: object
+      required:
+        - timestamp
+        - run_id
+        - proposal_id
+        - status
+        - suggested_decision
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        run_id:
+          type: string
+        proposal_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, reviewed, archived]
+        suggested_decision:
+          type: string
+          enum: [rebalance, hold, watch]
+        required_action:
+          type: string
+        advice_report_path:
+          type: string
+        proposal_path:
+          type: string
+        reviewed_at:
+          type: string
+          format: date-time
+        reviewed_by:
+          type: string
+        human_decision:
+          type: string
+          enum: [approve, hold, reject]
+        review_note:
+          type: string
+
+    ExecutionQueueItem:
+      type: object
+      required:
+        - queue_id
+        - run_id
+        - proposal_id
+        - status
+        - created_at
+        - order_count
+      properties:
+        queue_id:
+          type: string
+        run_id:
+          type: string
+        proposal_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, executed, failed, archived]
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        order_count:
+          type: integer
+        execution_orders_path:
+          type: string
+        stale:
+          type: boolean
+
+    ActionCenter:
+      type: object
+      required:
+        - generated_at
+        - overview
+        - pending_review
+        - pending_execution
+        - active_alerts
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        overview:
+          $ref: '#/components/schemas/ActionCenterOverview'
+        pending_review:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewQueueItem'
+        pending_execution:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionQueueItem'
+        active_alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertItem'
+
+    RunManifestLite:
+      type: object
+      required:
+        - run_id
+        - trading_date
+        - phase
+        - status
+        - dry_run
+      properties:
+        run_id:
+          type: string
+        trading_date:
+          type: string
+          format: date
+        as_of_ts:
+          type: string
+          format: date-time
+        phase:
+          type: string
+          enum: [preopen, intraday, postclose, all]
+        dry_run:
+          type: boolean
+        status:
+          type: string
+          enum: [success, failed]
+        duration_sec:
+          type: number
+        error_summary:
+          type: string
+
+    RunStep:
+      type: object
+      required: [phase, status]
+      properties:
+        phase:
+          type: string
+          enum: [preopen, intraday, postclose]
+        status:
+          type: string
+          enum: [success, failed]
+        error:
+          type: string
+
+    RunDetail:
+      allOf:
+        - $ref: '#/components/schemas/RunManifestLite'
+        - type: object
+          properties:
+            start_ts_utc:
+              type: string
+              format: date-time
+            end_ts_utc:
+              type: string
+              format: date-time
+            steps:
+              type: array
+              items:
+                $ref: '#/components/schemas/RunStep'
+            artifacts:
+              type: array
+              items:
+                type: string
+
+    ArtifactItem:
+      type: object
+      required: [name, path, kind, size]
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        kind:
+          type: string
+          enum: [json, jsonl, csv, markdown, text]
+        size:
+          type: integer
+
+    Proposal:
+      type: object
+      required:
+        - proposal_id
+        - run_id
+        - trading_date
+        - decision
+        - review_status
+      properties:
+        proposal_id:
+          type: string
+        run_id:
+          type: string
+        trading_date:
+          type: string
+          format: date
+        as_of_ts:
+          type: string
+          format: date-time
+        base_portfolio:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        new_portfolio:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        target_weights:
+          type: object
+          additionalProperties:
+            type: number
+        turnover_est:
+          type: number
+        transaction_cost_est:
+          type: number
+        risk_delta:
+          type: object
+          additionalProperties: true
+        evidence_completeness:
+          type: number
+        constraint_violations:
+          type: array
+          items:
+            type: string
+        gate_failures:
+          type: array
+          items:
+            type: string
+        feedback_context:
+          type: object
+          additionalProperties: true
+        decision:
+          type: string
+          enum: [rebalance, hold, watch]
+        review_status:
+          type: string
+        reviewed_by:
+          type: string
+        reviewed_at:
+          type: string
+          format: date-time
+        human_decision:
+          type: string
+          enum: [approve, hold, reject]
+        review_note:
+          type: string
+        execution_status:
+          type: string
+        execution_queue_id:
+          type: string
+
+    ResearchRow:
+      type: object
+      required: [ticker, confidence, verdict]
+      properties:
+        ticker:
+          type: string
+        name:
+          type: string
+        confidence:
+          type: number
+        verdict:
+          type: string
+          enum: [buy, observe, avoid]
+        thesis:
+          type: array
+          items:
+            type: string
+        risk_flags:
+          type: array
+          items:
+            type: string
+        tool_evidence:
+          type: object
+          additionalProperties: true
+
+    RebalanceAction:
+      type: object
+      required: [action, ticker, current_weight, target_weight, delta_weight]
+      properties:
+        action:
+          type: string
+          enum: [BUY, SELL, INCREASE, DECREASE, HOLD]
+        ticker:
+          type: string
+        name:
+          type: string
+        current_weight:
+          type: number
+        target_weight:
+          type: number
+        delta_weight:
+          type: number
+        reason:
+          type: string
+        priority:
+          type: integer
+        trigger_type:
+          type: string
+
+    ProposalDetailBundle:
+      type: object
+      required: [run_id, proposal, review_queue_item, advice_report, research_rows, rebalance_actions]
+      properties:
+        run_id:
+          type: string
+        proposal:
+          $ref: '#/components/schemas/Proposal'
+        review_queue_item:
+          $ref: '#/components/schemas/ReviewQueueItem'
+        advice_report:
+          type: string
+          description: markdown text content
+        research_rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResearchRow'
+        rebalance_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RebalanceAction'
+
+    ReviewSubmitRequest:
+      type: object
+      required: [decision, reviewer, note]
+      properties:
+        decision:
+          type: string
+          enum: [approve, hold, reject]
+        reviewer:
+          type: string
+          minLength: 1
+        note:
+          type: string
+          minLength: 1
+
+    ExecutionSubmitRequest:
+      type: object
+      required: [executor]
+      properties:
+        executor:
+          type: string
+          minLength: 1
+        dry_run:
+          type: boolean
+          default: false
+        force:
+          type: boolean
+          default: false
+
+    SchedulerOnceRequest:
+      type: object
+      properties:
+        dry_run:
+          type: boolean
+          default: false
+        skip_maintenance:
+          type: boolean
+          default: false
+        skip_ops_report:
+          type: boolean
+          default: false
+        skip_feedback:
+          type: boolean
+          default: false
+        skip_skill_promotion:
+          type: boolean
+          default: false
+        skip_alerts:
+          type: boolean
+          default: false
+        skip_action_center:
+          type: boolean
+          default: false
+        ops_on_idle:
+          type: boolean
+          default: false
+        ops_days:
+          type: integer
+          minimum: 1
+          default: 7
+        feedback_days:
+          type: integer
+          minimum: 1
+          default: 30
+
+    OpsReport:
+      type: object
+      required:
+        - generated_at
+        - window_start
+        - window_end
+        - health_score
+        - health_label
+        - run_stats
+        - phase_stats
+        - proposal_stats
+        - queue_stats
+        - execution_stats
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        window_start:
+          type: string
+          format: date
+        window_end:
+          type: string
+          format: date
+        health_score:
+          type: number
+        health_label:
+          type: string
+          enum: [healthy, watch, risk]
+        run_stats:
+          type: object
+          additionalProperties: true
+        phase_stats:
+          type: object
+          additionalProperties: true
+        proposal_stats:
+          type: object
+          additionalProperties: true
+        queue_stats:
+          type: object
+          additionalProperties: true
+        execution_stats:
+          type: object
+          additionalProperties: true
+        skill_stats:
+          type: object
+          additionalProperties: true
+        recent_failures:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    ProposalQualitySummary:
+      type: object
+      required:
+        - generated_at
+        - window_start
+        - window_end
+        - sample_size
+        - avg_quality_score
+        - avg_cost_ratio
+        - model_feedback
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        window_start:
+          type: string
+          format: date
+        window_end:
+          type: string
+          format: date
+        sample_size:
+          type: integer
+        avg_quality_score:
+          type: number
+        avg_cost_ratio:
+          type: number
+        model_feedback:
+          type: object
+          additionalProperties: true
+        quality_rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
