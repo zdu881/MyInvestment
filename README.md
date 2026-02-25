@@ -16,6 +16,7 @@
 - 技能沉淀：候选技能收集、晋升与版本化注册
 - WebUI 一站式入口：Action Center -> Review -> Execution -> Runs -> Ops
 - 前端 i18n：`zh-CN` / `en-US`，语言切换持久化
+- Agent 交互栏：`ask` / `plan` / `operation` 三模式（含 operation 预览与执行）
 
 ## 2. 项目结构
 
@@ -112,6 +113,7 @@ python3 agent_scheduler.py --once --dry-run
 python3 agent_scheduler.py --once --skip-maintenance --skip-ops-report
 python3 agent_scheduler.py --once --skip-feedback --skip-skill-promotion
 python3 agent_scheduler.py --once --skip-alerts
+python3 agent_scheduler.py --once --skip-notifier
 ```
 
 ## 5. 常用命令清单
@@ -143,6 +145,7 @@ python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force
 python3 agent_ops_report.py --days 7
 python3 agent_alerts.py
 python3 agent_action_center.py
+python3 agent_notifier.py --enabled --ntfy-enabled --ntfy-topic <YOUR_TOPIC>
 python3 agent_feedback.py --days 30
 python3 agent_queue_maintenance.py --dry-run
 python3 agent_queue_maintenance.py
@@ -163,6 +166,10 @@ python3 agent_skill_manager.py
 - `MYINVEST_COMMAND_TIMEOUT_SEC`：命令超时（默认 `120`，最小 `10`）
 - `MYINVEST_API_TOKEN`：写接口 Token（未设置则不鉴权）
 
+
+- `MYINVEST_NTFY_TOPIC`：ntfy topic（可覆盖配置中的 topic）
+- `MYINVEST_NTFY_BASE_URL`：ntfy server 地址（默认 `https://ntfy.sh`）
+
 ### 6.2 API 路由
 
 读接口：
@@ -173,6 +180,8 @@ python3 agent_skill_manager.py
 - `GET /api/alerts`
 - `GET /api/alerts/events`
 - `GET /api/quality/latest`
+- `GET /api/agent/operations`
+- `GET /api/agent/operations/history`
 - `GET /api/runs`
 - `GET /api/runs/{run_id}`
 - `GET /api/runs/{run_id}/artifacts`
@@ -186,6 +195,7 @@ python3 agent_skill_manager.py
 - `POST /api/reviews/{run_id}`
 - `POST /api/executions/{run_id}`
 - `POST /api/scheduler/once`
+- `POST /api/agent/interact`
 - `PATCH /api/config`
 
 ### 6.3 审计
@@ -309,6 +319,7 @@ E2E 用例：
 - 运行与命令清单：`README_AGENT_SYSTEM.md`
 - WebUI 需求：`docs/webui/WEBUI_PRD.md`
 - WebAPI 开发说明：`docs/webui/DEVELOPMENT.md`
+- 多终端通知接入（短信/微信）：`docs/notifications/NOTIFICATION_GUIDE.md`
 - OpenAPI 描述：`docs/webui/openapi.yaml`
 
 ---

@@ -41,6 +41,14 @@ class SchedulerOnceRequest(BaseModel):
     feedback_days: int = Field(default=30, ge=1)
 
 
+class AgentInteractRequest(BaseModel):
+    mode: str = Field(pattern="^(ask|plan|operation)$")
+    message: str = Field(default="", max_length=4000)
+    confirm: bool = False
+    operation_id: str | None = Field(default=None, max_length=80)
+    operation_options: dict[str, Any] = Field(default_factory=dict)
+
+
 CommandRunner = Callable[[list[str], Path, int], CommandResult]
 
 
@@ -80,6 +88,382 @@ def _audit(
         row["stdout_tail"] = command_result.stdout_tail
         row["stderr_tail"] = command_result.stderr_tail
     repo.append_jsonl(repo.state_root / "webui_audit_log.jsonl", row)
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _agent_snapshot(repo: FileRepo) -> dict[str, Any]:
+    action_center = repo.read_json(repo.runs_root / "ops" / "action_center_latest.json", default={})
+    alerts = repo.read_json(repo.runs_root / "ops" / "alerts_latest.json", default={})
+    ops_report = repo.read_json(repo.runs_root / "ops" / "ops_report_latest.json", default={})
+    overview = action_center.get("overview", {}) if isinstance(action_center.get("overview"), dict) else {}
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "overview": {
+            "health_score": _to_float(overview.get("health_score"), 0.0),
+            "health_label": str(overview.get("health_label", "unknown")),
+            "alert_status": str(overview.get("alert_status", "unknown")),
+            "active_alert_count": _to_int(overview.get("active_alert_count"), 0),
+            "pending_review_count": _to_int(overview.get("pending_review_count"), 0),
+            "pending_execution_count": _to_int(overview.get("pending_execution_count"), 0),
+        },
+        "alerts": {
+            "status": str(alerts.get("status", "unknown")),
+            "active_alert_count": _to_int(alerts.get("active_alert_count"), 0),
+            "active_alerts": alerts.get("active_alerts", []) if isinstance(alerts.get("active_alerts"), list) else [],
+        },
+        "ops_report": {
+            "health_score": _to_float(ops_report.get("health_score"), 0.0),
+            "health_label": str(ops_report.get("health_label", "unknown")),
+            "window_start": str(ops_report.get("window_start", "")),
+            "window_end": str(ops_report.get("window_end", "")),
+        },
+    }
+
+
+def _top_alert_lines(snapshot: dict[str, Any], limit: int = 3) -> list[str]:
+    alerts = snapshot.get("alerts", {})
+    rows = alerts.get("active_alerts", []) if isinstance(alerts, dict) else []
+    items: list[str] = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        level = str(row.get("level", "warn"))
+        check_id = str(row.get("check_id", "unknown_check"))
+        message = str(row.get("message", ""))
+        items.append(f"- [{level}] {check_id}: {message}")
+    return items
+
+
+def _build_ask_reply(message: str, snapshot: dict[str, Any]) -> str:
+    overview = snapshot.get("overview", {})
+    alerts = snapshot.get("alerts", {})
+    lines = [
+        f"问题: {message.strip()}",
+        "",
+        "系统当前快照:",
+        (
+            f"- health={overview.get('health_score', 0):.1f} "
+            f"({overview.get('health_label', 'unknown')})"
+        ),
+        f"- alert_status={overview.get('alert_status', 'unknown')}, active_alerts={alerts.get('active_alert_count', 0)}",
+        f"- pending_review={overview.get('pending_review_count', 0)}",
+        f"- pending_execution={overview.get('pending_execution_count', 0)}",
+        "",
+    ]
+    alert_lines = _top_alert_lines(snapshot)
+    if alert_lines:
+        lines.append("重点告警:")
+        lines.extend(alert_lines)
+    else:
+        lines.append("重点告警: 无")
+    lines.extend(
+        [
+            "",
+            "可继续追问示例:",
+            "- 请解释最高优先级告警",
+            "- 给我今天先做哪三件事",
+            "- 帮我准备 operation 模式命令",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_plan_reply(message: str, snapshot: dict[str, Any]) -> str:
+    overview = snapshot.get("overview", {})
+    pending_review = _to_int(overview.get("pending_review_count"), 0)
+    pending_execution = _to_int(overview.get("pending_execution_count"), 0)
+    active_alerts = _to_int(snapshot.get("alerts", {}).get("active_alert_count"), 0)
+
+    lines = [
+        f"规划目标: {message.strip()}",
+        "",
+        "建议执行顺序:",
+    ]
+    step = 1
+    if active_alerts > 0:
+        lines.append(f"{step}. 先处理告警（当前 {active_alerts} 条），优先级按 critical > warn。")
+        step += 1
+    if pending_review > 0:
+        lines.append(f"{step}. 处理人工审核队列（当前 {pending_review} 条 pending review）。")
+        step += 1
+    if pending_execution > 0:
+        lines.append(f"{step}. 检查并执行 execution 队列（当前 {pending_execution} 条 pending execution）。")
+        step += 1
+    lines.append(f"{step}. 运行一次 dry-run 调度确认状态收敛。")
+    lines.extend(
+        [
+            "",
+            "operation 模式建议输入:",
+            "- run scheduler once",
+            "- refresh alerts",
+            "- refresh action center",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _agent_operation_specs() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "scheduler_once",
+            "label": "Run scheduler once",
+            "i18n_key": "agent.operation.scheduler_once",
+            "keywords": ["scheduler", "run once", "调度", "全流程"],
+            "options": [
+                {
+                    "name": "dry_run",
+                    "type": "bool",
+                    "default": True,
+                    "i18n_key": "agent.option.dry_run",
+                },
+                {
+                    "name": "skip_maintenance",
+                    "type": "bool",
+                    "default": False,
+                    "i18n_key": "agent.option.skip_maintenance",
+                },
+                {
+                    "name": "skip_alerts",
+                    "type": "bool",
+                    "default": False,
+                    "i18n_key": "agent.option.skip_alerts",
+                },
+                {
+                    "name": "skip_notifier",
+                    "type": "bool",
+                    "default": False,
+                    "i18n_key": "agent.option.skip_notifier",
+                },
+            ],
+        },
+        {
+            "id": "refresh_alerts",
+            "label": "Refresh alerts",
+            "i18n_key": "agent.operation.refresh_alerts",
+            "keywords": ["refresh alerts", "alerts", "告警"],
+            "options": [],
+        },
+        {
+            "id": "refresh_action_center",
+            "label": "Refresh action center",
+            "i18n_key": "agent.operation.refresh_action_center",
+            "keywords": ["action center", "行动中心"],
+            "options": [],
+        },
+        {
+            "id": "generate_ops_report",
+            "label": "Generate ops report",
+            "i18n_key": "agent.operation.generate_ops_report",
+            "keywords": ["ops report", "运维报告", "health report"],
+            "options": [
+                {
+                    "name": "days",
+                    "type": "int",
+                    "default": 7,
+                    "min": 1,
+                    "max": 30,
+                    "i18n_key": "agent.option.days",
+                }
+            ],
+        },
+        {
+            "id": "run_notifier",
+            "label": "Run notifier",
+            "i18n_key": "agent.operation.run_notifier",
+            "keywords": ["notifier", "ntfy", "推送"],
+            "options": [
+                {
+                    "name": "dry_run",
+                    "type": "bool",
+                    "default": True,
+                    "i18n_key": "agent.option.dry_run",
+                }
+            ],
+        },
+        {
+            "id": "queue_maintenance",
+            "label": "Run queue maintenance",
+            "i18n_key": "agent.operation.queue_maintenance",
+            "keywords": ["queue", "队列维护"],
+            "options": [
+                {
+                    "name": "dry_run",
+                    "type": "bool",
+                    "default": True,
+                    "i18n_key": "agent.option.dry_run",
+                }
+            ],
+        },
+    ]
+
+
+def _agent_operation_public_specs() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for spec in _agent_operation_specs():
+        items.append(
+            {
+                "id": spec["id"],
+                "label": spec["label"],
+                "i18n_key": spec.get("i18n_key", ""),
+                "options": spec.get("options", []),
+            }
+        )
+    return items
+
+
+def _find_operation_spec(operation_id: str) -> dict[str, Any] | None:
+    op_id = str(operation_id or "").strip()
+    for spec in _agent_operation_specs():
+        if spec["id"] == op_id:
+            return spec
+    return None
+
+
+def _normalize_operation_options(spec: dict[str, Any], raw_options: dict[str, Any] | None) -> dict[str, Any]:
+    values = raw_options if isinstance(raw_options, dict) else {}
+    normalized: dict[str, Any] = {}
+    for item in spec.get("options", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        typ = str(item.get("type", "")).strip().lower()
+        default_value = item.get("default")
+        raw_value = values.get(name, default_value)
+        if typ == "bool":
+            normalized[name] = _to_bool(raw_value, bool(default_value))
+            continue
+        if typ == "int":
+            parsed = _to_int(raw_value, _to_int(default_value, 0))
+            if "min" in item:
+                parsed = max(parsed, _to_int(item.get("min"), parsed))
+            if "max" in item:
+                parsed = min(parsed, _to_int(item.get("max"), parsed))
+            normalized[name] = parsed
+            continue
+        normalized[name] = str(raw_value if raw_value is not None else default_value or "")
+    return normalized
+
+
+def _build_operation_command(operation_id: str, raw_options: dict[str, Any] | None) -> dict[str, Any] | None:
+    spec = _find_operation_spec(operation_id)
+    if spec is None:
+        return None
+    options = _normalize_operation_options(spec, raw_options)
+    op_id = spec["id"]
+    command: list[str]
+
+    if op_id == "scheduler_once":
+        command = [sys.executable, "agent_scheduler.py", "--once"]
+        if _to_bool(options.get("dry_run"), True):
+            command.append("--dry-run")
+        if _to_bool(options.get("skip_maintenance"), False):
+            command.append("--skip-maintenance")
+        if _to_bool(options.get("skip_alerts"), False):
+            command.append("--skip-alerts")
+        if _to_bool(options.get("skip_notifier"), False):
+            command.append("--skip-notifier")
+    elif op_id == "refresh_alerts":
+        command = [sys.executable, "agent_alerts.py"]
+    elif op_id == "refresh_action_center":
+        command = [sys.executable, "agent_action_center.py"]
+    elif op_id == "generate_ops_report":
+        command = [sys.executable, "agent_ops_report.py", "--days", str(_to_int(options.get("days"), 7))]
+    elif op_id == "run_notifier":
+        command = [sys.executable, "agent_notifier.py", "--enabled"]
+        if _to_bool(options.get("dry_run"), True):
+            command.append("--dry-run")
+    elif op_id == "queue_maintenance":
+        command = [sys.executable, "agent_queue_maintenance.py"]
+        if _to_bool(options.get("dry_run"), True):
+            command.append("--dry-run")
+    else:
+        return None
+
+    return {
+        "id": spec["id"],
+        "label": spec["label"],
+        "i18n_key": spec.get("i18n_key", ""),
+        "command": command,
+        "options": options,
+    }
+
+
+def _detect_operation(message: str) -> dict[str, Any] | None:
+    text = message.lower().strip()
+    if not text:
+        return None
+    for spec in _agent_operation_specs():
+        if any(str(keyword) in text for keyword in spec.get("keywords", [])):
+            return _build_operation_command(spec["id"], {})
+    return None
+
+
+def _operation_help_text() -> str:
+    names = [f"- {spec['id']}" for spec in _agent_operation_public_specs()]
+    return "\n".join(
+        [
+            "未识别到可执行操作。",
+            "可用 operation_id:",
+            *names,
+            "",
+            "也可继续输入自然语言关键词，例如: refresh alerts",
+        ]
+    )
+
+
+def _operation_history_path(repo: FileRepo) -> Path:
+    return repo.state_root / "agent_operation_history.jsonl"
+
+
+def _append_operation_history(
+    repo: FileRepo,
+    *,
+    user: str,
+    message: str,
+    operation_payload: dict[str, Any],
+    command_result: CommandResult,
+) -> None:
+    row: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "user": user,
+        "message": message,
+        "operation_id": operation_payload.get("id", ""),
+        "operation_label": operation_payload.get("label", ""),
+        "operation_i18n_key": operation_payload.get("i18n_key", ""),
+        "operation_options": operation_payload.get("options", {}),
+        "command": command_result.command,
+        "exit_code": command_result.exit_code,
+        "ok": command_result.ok,
+        "stdout_tail": command_result.stdout_tail,
+        "stderr_tail": command_result.stderr_tail,
+    }
+    repo.append_jsonl(_operation_history_path(repo), row)
 
 
 def create_app(
@@ -164,6 +548,16 @@ def create_app(
         if not data:
             raise _error("not_found", "quality report not found", status=404)
         return data
+
+    @app.get("/api/agent/operations")
+    def list_agent_operations() -> dict[str, Any]:
+        return {"items": _agent_operation_public_specs()}
+
+    @app.get("/api/agent/operations/history")
+    def list_agent_operation_history(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+        rows = repo.read_jsonl(_operation_history_path(repo))
+        rows = sorted(rows, key=lambda x: str(x.get("timestamp", "")), reverse=True)
+        return {"items": rows[:limit]}
 
     @app.get("/api/runs")
     def list_runs(
@@ -354,6 +748,107 @@ def create_app(
         if not result.ok:
             raise _error("command_failed", "scheduler command failed", status=500, details=output)
         return output
+
+    @app.post("/api/agent/interact")
+    def agent_interact(
+        body: AgentInteractRequest,
+        user: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        mode = str(body.mode).strip().lower()
+        message = str(body.message or "").strip()
+        snapshot = _agent_snapshot(repo)
+        command_result: CommandResult | None = None
+        operation_payload: dict[str, Any] | None = None
+        ok = True
+
+        if mode == "ask":
+            if not message:
+                raise _error("bad_request", "message is required in ask mode", status=400)
+            reply = _build_ask_reply(message, snapshot)
+        elif mode == "plan":
+            if not message:
+                raise _error("bad_request", "message is required in plan mode", status=400)
+            reply = _build_plan_reply(message, snapshot)
+        else:
+            selected_operation_id = str(body.operation_id or "").strip()
+            selected_operation_options = body.operation_options if isinstance(body.operation_options, dict) else {}
+
+            operation_spec = None
+            if selected_operation_id:
+                operation_spec = _build_operation_command(selected_operation_id, selected_operation_options)
+            if operation_spec is None:
+                operation_spec = _detect_operation(message)
+
+            if operation_spec is None:
+                ok = False
+                reply = _operation_help_text()
+            else:
+                operation_payload = {
+                    "id": operation_spec["id"],
+                    "label": operation_spec["label"],
+                    "i18n_key": operation_spec.get("i18n_key", ""),
+                    "options": operation_spec.get("options", {}),
+                    "command": operation_spec["command"],
+                    "executed": False,
+                }
+                if body.confirm:
+                    command_result = runner(operation_spec["command"], cfg.root_dir, cfg.command_timeout_sec)
+                    operation_payload["executed"] = True
+                    operation_payload["exit_code"] = command_result.exit_code
+                    operation_payload["stdout_tail"] = command_result.stdout_tail
+                    operation_payload["stderr_tail"] = command_result.stderr_tail
+                    ok = command_result.ok
+                    _append_operation_history(
+                        repo=repo,
+                        user=user,
+                        message=message,
+                        operation_payload=operation_payload,
+                        command_result=command_result,
+                    )
+                    reply_lines = [
+                        f"已执行操作: {operation_spec['label']}",
+                        f"exit_code={command_result.exit_code}",
+                    ]
+                    if command_result.stdout_tail:
+                        reply_lines.append("")
+                        reply_lines.append("stdout_tail:")
+                        reply_lines.append(command_result.stdout_tail)
+                    if command_result.stderr_tail:
+                        reply_lines.append("")
+                        reply_lines.append("stderr_tail:")
+                        reply_lines.append(command_result.stderr_tail)
+                    reply = "\n".join(reply_lines)
+                else:
+                    reply = "\n".join(
+                        [
+                            f"已识别操作: {operation_spec['label']}",
+                            f"command: {' '.join(operation_spec['command'])}",
+                            "当前为预览模式。勾选 confirm 后将实际执行。",
+                        ]
+                    )
+
+        _audit(
+            repo=repo,
+            action="agent_interact",
+            payload={
+                "mode": mode,
+                "message": message,
+                "confirm": body.confirm,
+                "ok": ok,
+                "operation_options": body.operation_options,
+                "operation_id": operation_payload["id"] if operation_payload else "",
+            },
+            user=user,
+            command_result=command_result,
+        )
+
+        return {
+            "ok": ok,
+            "mode": mode,
+            "reply": reply,
+            "operation": operation_payload,
+            "snapshot": snapshot,
+        }
 
     @app.get("/api/config")
     def get_config() -> dict[str, Any]:

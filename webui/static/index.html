@@ -41,8 +41,54 @@
       <button class="tab" data-view="runs" data-i18n="tab.runs">Runs</button>
       <button class="tab" data-view="alerts-ops" data-i18n="tab.alertsOps">Alerts & Ops</button>
       <button class="tab" data-view="quality" data-i18n="tab.quality">Quality Feedback</button>
+      <button class="tab" data-view="operation-history" data-i18n="tab.operationHistory">Operation History</button>
       <button class="tab" data-view="config" data-i18n="tab.config">State & Config</button>
     </nav>
+
+    <section class="agent-bar">
+      <div class="agent-head">
+        <div>
+          <h2 data-i18n="agent.title">Agent Interaction</h2>
+          <p id="agentModeHint" class="agent-mode-hint" data-i18n="agent.hint.ask">Ask mode: quick questions and status checks.</p>
+        </div>
+        <div class="agent-mode-switch" id="agentModeSwitch">
+          <button type="button" class="agent-mode active" data-agent-mode="ask" data-i18n="agent.mode.ask">Ask</button>
+          <button type="button" class="agent-mode" data-agent-mode="plan" data-i18n="agent.mode.plan">Plan</button>
+          <button type="button" class="agent-mode" data-agent-mode="operation" data-i18n="agent.mode.operation">Operation</button>
+        </div>
+      </div>
+      <form id="agentForm" class="agent-form">
+        <label>
+          <span data-i18n="agent.promptLabel">Prompt</span>
+          <textarea
+            id="agentPromptInput"
+            rows="3"
+            placeholder="输入你的问题或操作命令"
+            data-i18n-placeholder="agent.prompt.ask"
+          ></textarea>
+        </label>
+        <div id="agentOperationPanel" class="agent-op-panel">
+          <label>
+            <span data-i18n="agent.operation.select">操作项</span>
+            <select id="agentOperationSelect"></select>
+          </label>
+          <div id="agentOperationOptions" class="agent-op-options"></div>
+        </div>
+        <div class="agent-actions">
+          <label class="checkbox-row agent-confirm" id="agentConfirmRow">
+            <input type="checkbox" id="agentConfirmExec" />
+            <span data-i18n="agent.operation.confirm">Operation 模式下执行命令</span>
+          </label>
+          <div class="agent-buttons">
+            <button type="button" class="btn ghost" id="agentClearBtn" data-i18n="agent.clear">清空</button>
+            <button type="submit" class="btn" id="agentSendBtn" data-i18n="agent.send">发送</button>
+          </div>
+        </div>
+      </form>
+      <div id="agentConversation" class="agent-conversation">
+        <div class="agent-empty mono" data-i18n="agent.history.empty">暂无交互记录</div>
+      </div>
+    </section>
 
     <main>
       <section class="view active" id="view-action-center">
@@ -193,6 +239,32 @@
             <div id="qualityCases"></div>
           </article>
         </div>
+      </section>
+
+      <section class="view" id="view-operation-history">
+        <div class="section-head">
+          <h2 data-i18n="tab.operationHistory">Operation History</h2>
+          <button class="btn" id="refreshOperationHistoryBtn" data-i18n="common.refresh">刷新</button>
+        </div>
+        <article class="panel">
+          <h3 data-i18n="operationHistory.tableTitle">Operation Execution History</h3>
+          <div class="table-wrap">
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th data-i18n="operationHistory.col.time">Time</th>
+                  <th data-i18n="operationHistory.col.operation">Operation</th>
+                  <th data-i18n="operationHistory.col.options">Options</th>
+                  <th data-i18n="operationHistory.col.command">Command</th>
+                  <th data-i18n="operationHistory.col.exitCode">Exit</th>
+                  <th data-i18n="operationHistory.col.status">Status</th>
+                  <th data-i18n="operationHistory.col.output">Output</th>
+                </tr>
+              </thead>
+              <tbody id="operationHistoryBody"></tbody>
+            </table>
+          </div>
+        </article>
       </section>
 
       <section class="view" id="view-config">

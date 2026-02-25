@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -56,6 +57,7 @@ def _copy_runtime_scripts(repo_root: Path, workspace_root: Path) -> None:
         "agent_skill_manager.py",
         "agent_alerts.py",
         "agent_action_center.py",
+        "agent_notifier.py",
         "agent_system.py",
     ]
     for name in script_names:
@@ -81,6 +83,10 @@ def test_read_endpoints(tmp_path: Path) -> None:
     assert client.get("/api/alerts").status_code == 200
     assert client.get("/api/alerts/events").status_code == 200
     assert client.get("/api/quality/latest").status_code == 200
+    assert client.get("/api/agent/operations").status_code == 200
+    history = client.get("/api/agent/operations/history")
+    assert history.status_code == 200
+    assert isinstance(history.json()["items"], list)
 
     runs = client.get("/api/runs?limit=10")
     assert runs.status_code == 200
@@ -168,6 +174,99 @@ def test_mutation_endpoints_and_config_patch(tmp_path: Path) -> None:
     audit_path = settings.state_root / "webui_audit_log.jsonl"
     assert audit_path.exists()
     assert len(audit_path.read_text(encoding="utf-8").strip().splitlines()) >= 4
+
+
+def test_agent_interact_modes(tmp_path: Path) -> None:
+    client, calls, settings = _build_client(tmp_path)
+
+    ask_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "ask", "message": "当前状态如何"},
+    )
+    assert ask_resp.status_code == 200
+    ask_payload = ask_resp.json()
+    assert ask_payload["mode"] == "ask"
+    assert ask_payload["ok"] is True
+    assert "系统当前快照" in ask_payload["reply"]
+
+    plan_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "plan", "message": "给我今天的计划"},
+    )
+    assert plan_resp.status_code == 200
+    plan_payload = plan_resp.json()
+    assert plan_payload["mode"] == "plan"
+    assert "1." in plan_payload["reply"]
+
+    preview_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "operation", "message": "refresh alerts", "confirm": False},
+    )
+    assert preview_resp.status_code == 200
+    preview_payload = preview_resp.json()
+    assert preview_payload["ok"] is True
+    assert preview_payload["operation"]["executed"] is False
+
+    before_calls = len(calls)
+    execute_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "operation", "message": "refresh alerts", "confirm": True},
+    )
+    assert execute_resp.status_code == 200
+    execute_payload = execute_resp.json()
+    assert execute_payload["ok"] is True
+    assert execute_payload["operation"]["executed"] is True
+    assert len(calls) == before_calls + 1
+    assert "agent_alerts.py" in " ".join(calls[-1])
+
+    structured_resp = client.post(
+        "/api/agent/interact",
+        json={
+            "mode": "operation",
+            "message": "",
+            "confirm": True,
+            "operation_id": "scheduler_once",
+            "operation_options": {
+                "dry_run": True,
+                "skip_maintenance": True,
+                "skip_alerts": True,
+                "skip_notifier": True,
+            },
+        },
+    )
+    assert structured_resp.status_code == 200
+    structured_payload = structured_resp.json()
+    assert structured_payload["ok"] is True
+    cmd = calls[-1]
+    assert "agent_scheduler.py" in " ".join(cmd)
+    assert "--once" in cmd
+    assert "--dry-run" in cmd
+    assert "--skip-maintenance" in cmd
+    assert "--skip-alerts" in cmd
+    assert "--skip-notifier" in cmd
+
+    unknown_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "operation", "message": "do something impossible", "confirm": True},
+    )
+    assert unknown_resp.status_code == 200
+    assert unknown_resp.json()["ok"] is False
+
+    history_resp = client.get("/api/agent/operations/history?limit=20")
+    assert history_resp.status_code == 200
+    history_items = history_resp.json()["items"]
+    assert len(history_items) >= 2
+    assert any(item.get("operation_id") == "refresh_alerts" for item in history_items)
+    assert any(item.get("operation_id") == "scheduler_once" for item in history_items)
+    assert all("exit_code" in item for item in history_items)
+
+    audit_path = settings.state_root / "webui_audit_log.jsonl"
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(row.get("action") == "agent_interact" for row in rows)
 
 
 def test_real_command_runner_flow(tmp_path: Path) -> None:

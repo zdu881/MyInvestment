@@ -1,11 +1,28 @@
 const LOCALE_STORAGE_KEY = 'myinvestment_locale';
+const AGENT_MODE_STORAGE_KEY = 'myinvestment_agent_mode';
+const AGENT_OPERATION_STORAGE_KEY = 'myinvestment_agent_operation_id';
 const DEFAULT_LOCALE = 'zh-CN';
 const LOCALE_BASE_PATH = '/static/locales';
 const localeDicts = {};
+const AGENT_HINT_KEYS = {
+  ask: 'agent.hint.ask',
+  plan: 'agent.hint.plan',
+  operation: 'agent.hint.operation',
+};
+const AGENT_PLACEHOLDER_KEYS = {
+  ask: 'agent.prompt.ask',
+  plan: 'agent.prompt.plan',
+  operation: 'agent.prompt.operation',
+};
 
 const state = {
   activeView: 'action-center',
   locale: DEFAULT_LOCALE,
+  agentMode: 'ask',
+  agentOperationId: '',
+  agentOperationSpecs: [],
+  agentHistory: [],
+  operationHistory: [],
   proposals: [],
   executions: [],
   runs: [],
@@ -73,8 +90,24 @@ function detectInitialLocale() {
   return normalizeLocale(navigator.language || DEFAULT_LOCALE);
 }
 
+function normalizeAgentMode(mode) {
+  const value = String(mode || '').toLowerCase();
+  if (value === 'plan') return 'plan';
+  if (value === 'operation') return 'operation';
+  return 'ask';
+}
+
+function detectInitialAgentMode() {
+  return normalizeAgentMode(localStorage.getItem(AGENT_MODE_STORAGE_KEY));
+}
+
+function detectInitialAgentOperationId() {
+  return String(localStorage.getItem(AGENT_OPERATION_STORAGE_KEY) || '').trim();
+}
+
 function escapeHtml(text) {
-  return String(text || '')
+  const raw = text === null || text === undefined ? '' : String(text);
+  return raw
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
@@ -106,6 +139,9 @@ function applyI18nToDom() {
   if (langSelect) {
     langSelect.value = state.locale;
   }
+
+  setAgentMode(state.agentMode, { persist: false });
+  renderAgentConversation();
 }
 
 async function setLocale(locale, options = {}) {
@@ -183,6 +219,314 @@ function setView(view) {
   loadCurrentView();
 }
 
+function formatLocalTimestamp(value) {
+  try {
+    if (!value) return '';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return String(value);
+    return dt.toLocaleString();
+  } catch {
+    return String(value || '');
+  }
+}
+
+function getAgentOperationSpecById(operationId) {
+  const opId = String(operationId || '').trim();
+  return state.agentOperationSpecs.find((spec) => String(spec.id || '') === opId) || null;
+}
+
+function getAgentOperationLabel(spec) {
+  if (!spec) return '-';
+  const key = String(spec.i18n_key || '').trim();
+  if (key && hasTranslationKey(key)) return t(key);
+  return String(spec.label || spec.id || '-');
+}
+
+function getAgentOperationOptionLabel(option) {
+  const key = String(option?.i18n_key || '').trim();
+  if (key && hasTranslationKey(key)) return t(key);
+  return String(option?.name || '-');
+}
+
+function renderAgentOperationSelect() {
+  const select = byId('agentOperationSelect');
+  if (!select) return;
+
+  if (!state.agentOperationSpecs.length) {
+    select.innerHTML = `<option value="">${escapeHtml(t('common.none'))}</option>`;
+    select.disabled = true;
+    state.agentOperationId = '';
+    return;
+  }
+
+  if (!getAgentOperationSpecById(state.agentOperationId)) {
+    state.agentOperationId = String(state.agentOperationSpecs[0].id || '');
+  }
+
+  select.innerHTML = state.agentOperationSpecs
+    .map((spec) => `<option value="${escapeHtml(spec.id)}">${escapeHtml(getAgentOperationLabel(spec))}</option>`)
+    .join('');
+  select.value = state.agentOperationId;
+  select.disabled = false;
+}
+
+function getAgentOptionInputId(name) {
+  return `agentOpOpt_${String(name || '').replaceAll(/[^A-Za-z0-9_]/g, '_')}`;
+}
+
+function renderAgentOperationOptions() {
+  const container = byId('agentOperationOptions');
+  if (!container) return;
+  const spec = getAgentOperationSpecById(state.agentOperationId);
+  if (!spec) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const options = Array.isArray(spec.options) ? spec.options : [];
+  if (!options.length) {
+    container.innerHTML = `<div class="mono">${escapeHtml(t('agent.operation.noOptions'))}</div>`;
+    return;
+  }
+
+  container.innerHTML = options.map((opt) => {
+    const name = String(opt.name || '').trim();
+    const typ = String(opt.type || '').toLowerCase();
+    const label = escapeHtml(getAgentOperationOptionLabel(opt));
+    const inputId = getAgentOptionInputId(name);
+
+    if (typ === 'bool') {
+      const checked = Boolean(opt.default) ? ' checked' : '';
+      return `
+        <label class="checkbox-row">
+          <input id="${escapeHtml(inputId)}" data-op-name="${escapeHtml(name)}" type="checkbox"${checked} />
+          <span>${label}</span>
+        </label>
+      `;
+    }
+
+    if (typ === 'int') {
+      const minAttr = Number.isFinite(Number(opt.min)) ? ` min="${escapeHtml(opt.min)}"` : '';
+      const maxAttr = Number.isFinite(Number(opt.max)) ? ` max="${escapeHtml(opt.max)}"` : '';
+      const val = Number.isFinite(Number(opt.default)) ? Number(opt.default) : 0;
+      return `
+        <label>
+          <span>${label}</span>
+          <input
+            id="${escapeHtml(inputId)}"
+            data-op-name="${escapeHtml(name)}"
+            data-op-type="int"
+            type="number"
+            value="${escapeHtml(val)}"${minAttr}${maxAttr}
+          />
+        </label>
+      `;
+    }
+
+    return `
+      <label>
+        <span>${label}</span>
+        <input id="${escapeHtml(inputId)}" data-op-name="${escapeHtml(name)}" type="text" value="${escapeHtml(opt.default || '')}" />
+      </label>
+    `;
+  }).join('');
+}
+
+function collectAgentOperationOptions(spec) {
+  const options = Array.isArray(spec?.options) ? spec.options : [];
+  const out = {};
+  options.forEach((opt) => {
+    const name = String(opt.name || '').trim();
+    if (!name) return;
+    const typ = String(opt.type || '').toLowerCase();
+    const input = byId(getAgentOptionInputId(name));
+    if (!input) return;
+
+    if (typ === 'bool') {
+      out[name] = Boolean(input.checked);
+      return;
+    }
+
+    if (typ === 'int') {
+      const fallback = Number.isFinite(Number(opt.default)) ? Number(opt.default) : 0;
+      let value = Number.parseInt(String(input.value || ''), 10);
+      if (Number.isNaN(value)) value = fallback;
+      if (Number.isFinite(Number(opt.min))) value = Math.max(value, Number(opt.min));
+      if (Number.isFinite(Number(opt.max))) value = Math.min(value, Number(opt.max));
+      out[name] = value;
+      return;
+    }
+
+    out[name] = String(input.value || '');
+  });
+  return out;
+}
+
+function getAgentOperationPromptFallback(spec, options) {
+  const parts = Object.entries(options || {}).map(([k, v]) => `${k}=${v}`);
+  const suffix = parts.length ? ` (${parts.join(', ')})` : '';
+  return `${getAgentOperationLabel(spec)}${suffix}`;
+}
+
+async function loadAgentOperationSpecs() {
+  const resp = await request('/api/agent/operations');
+  const items = Array.isArray(resp.items) ? resp.items : [];
+  state.agentOperationSpecs = items;
+
+  if (!getAgentOperationSpecById(state.agentOperationId) && items.length > 0) {
+    state.agentOperationId = String(items[0].id || '');
+    localStorage.setItem(AGENT_OPERATION_STORAGE_KEY, state.agentOperationId);
+  }
+
+  renderAgentOperationSelect();
+  renderAgentOperationOptions();
+}
+
+function setAgentMode(mode, options = {}) {
+  const { persist = true } = options;
+  state.agentMode = normalizeAgentMode(mode);
+
+  if (persist) {
+    localStorage.setItem(AGENT_MODE_STORAGE_KEY, state.agentMode);
+  }
+
+  document.querySelectorAll('.agent-mode').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.agentMode === state.agentMode);
+  });
+
+  const hintNode = byId('agentModeHint');
+  if (hintNode) {
+    hintNode.textContent = t(AGENT_HINT_KEYS[state.agentMode]);
+  }
+
+  const promptInput = byId('agentPromptInput');
+  if (promptInput) {
+    promptInput.placeholder = t(AGENT_PLACEHOLDER_KEYS[state.agentMode]);
+  }
+
+  const confirmRow = byId('agentConfirmRow');
+  if (confirmRow) {
+    confirmRow.classList.toggle('show', state.agentMode === 'operation');
+  }
+
+  const operationPanel = byId('agentOperationPanel');
+  if (operationPanel) {
+    operationPanel.classList.toggle('show', state.agentMode === 'operation');
+  }
+
+  if (state.agentMode === 'operation') {
+    renderAgentOperationSelect();
+    renderAgentOperationOptions();
+  }
+}
+
+function renderAgentConversation() {
+  const container = byId('agentConversation');
+  if (!container) return;
+
+  if (!state.agentHistory.length) {
+    container.innerHTML = `<div class="agent-empty mono">${escapeHtml(t('agent.history.empty'))}</div>`;
+    return;
+  }
+
+  container.innerHTML = state.agentHistory.map((row) => {
+    const modeKey = `agent.mode.${row.mode}`;
+    const modeLabel = hasTranslationKey(modeKey) ? t(modeKey) : row.mode;
+    const statusTag = row.ok ? 'tag ok' : 'tag warn';
+    const operation = row.operation || {};
+    const opLabel = operation.i18n_key && hasTranslationKey(operation.i18n_key)
+      ? t(operation.i18n_key)
+      : operation.label || operation.id || '-';
+    const opOptions = operation.options ? JSON.stringify(operation.options) : '{}';
+    const operationBlock = operation.id ? `
+      <div class="agent-turn-op mono">
+        <div><b>${escapeHtml(t('agent.turn.operation'))}</b>: ${escapeHtml(opLabel)}</div>
+        <div><b>${escapeHtml(t('agent.turn.options'))}</b>: ${escapeHtml(opOptions)}</div>
+        <div><b>${escapeHtml(t('agent.turn.command'))}</b>: ${escapeHtml((operation.command || []).join(' '))}</div>
+        <div><b>${escapeHtml(t('agent.turn.exitCode'))}</b>: ${escapeHtml(operation.executed ? operation.exit_code : t('agent.turn.preview'))}</div>
+      </div>
+    ` : '';
+    return `
+      <article class="agent-turn">
+        <div class="agent-turn-head">
+          <span class="${statusTag}">${escapeHtml(modeLabel)}</span>
+          <span class="mono">${escapeHtml(formatLocalTimestamp(row.created_at))}</span>
+        </div>
+        <div class="agent-turn-block">
+          <div class="agent-turn-role">${escapeHtml(t('agent.turn.you'))}</div>
+          <pre class="agent-turn-text">${escapeHtml(row.prompt || '')}</pre>
+        </div>
+        <div class="agent-turn-block">
+          <div class="agent-turn-role">${escapeHtml(t('agent.turn.agent'))}</div>
+          <pre class="agent-turn-text">${escapeHtml(row.reply || '')}</pre>
+        </div>
+        ${operationBlock}
+      </article>
+    `;
+  }).join('');
+}
+
+async function submitAgentInteraction() {
+  const promptInput = byId('agentPromptInput');
+  const sendBtn = byId('agentSendBtn');
+  const confirmExec = byId('agentConfirmExec');
+  const mode = state.agentMode;
+  let message = promptInput.value.trim();
+  const confirm = mode === 'operation' && Boolean(confirmExec?.checked);
+  const payload = { mode, message, confirm };
+
+  if (mode === 'operation') {
+    const spec = getAgentOperationSpecById(state.agentOperationId);
+    if (!spec) {
+      notify(t('agent.operation.required'), true);
+      return;
+    }
+    const options = collectAgentOperationOptions(spec);
+    payload.operation_id = spec.id;
+    payload.operation_options = options;
+    if (!message) {
+      message = getAgentOperationPromptFallback(spec, options);
+      payload.message = message;
+    }
+  } else if (!message) {
+    notify(t('agent.prompt.required'), true);
+    return;
+  }
+
+  sendBtn.disabled = true;
+  sendBtn.textContent = t('agent.sending');
+
+  try {
+    const resp = await request('/api/agent/interact', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    state.agentHistory.unshift({
+      created_at: new Date().toISOString(),
+      mode,
+      prompt: message,
+      reply: resp.reply || '',
+      ok: Boolean(resp.ok),
+      operation: resp.operation || null,
+    });
+    state.agentHistory = state.agentHistory.slice(0, 20);
+
+    promptInput.value = '';
+    if (confirmExec) confirmExec.checked = false;
+    renderAgentConversation();
+    if (mode === 'operation' && confirm) {
+      await loadOperationHistory().catch(() => {});
+    }
+    notify(resp.ok ? t('agent.send.success') : t('agent.send.partial'), !resp.ok);
+  } catch (err) {
+    notify(err.message || String(err), true);
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = t('agent.send');
+  }
+}
+
 function renderList(containerId, items, renderItem) {
   const container = byId(containerId);
   if (!items || items.length === 0) {
@@ -196,6 +540,10 @@ function toTag(level) {
   if (level === 'critical') return 'tag critical';
   if (level === 'warn') return 'tag warn';
   return 'tag ok';
+}
+
+function toOkTag(ok) {
+  return ok ? 'tag ok' : 'tag critical';
 }
 
 async function loadActionCenter() {
@@ -417,6 +765,48 @@ async function loadConfig() {
   byId('configView').textContent = JSON.stringify(cfg, null, 2);
 }
 
+async function loadOperationHistory() {
+  const data = await request('/api/agent/operations/history?limit=120');
+  state.operationHistory = Array.isArray(data.items) ? data.items : [];
+  const body = byId('operationHistoryBody');
+  if (!body) return;
+
+  if (!state.operationHistory.length) {
+    body.innerHTML = `
+      <tr>
+        <td colspan="7" class="mono">${escapeHtml(t('operationHistory.empty'))}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  body.innerHTML = state.operationHistory.map((row) => {
+    const opLabel = (row.operation_i18n_key && hasTranslationKey(row.operation_i18n_key))
+      ? t(row.operation_i18n_key)
+      : (row.operation_label || row.operation_id || '-');
+    const optionsText = JSON.stringify(row.operation_options || {});
+    const commandText = Array.isArray(row.command) ? row.command.join(' ') : String(row.command || '');
+    const outputLines = [
+      row.stdout_tail ? `stdout:\n${row.stdout_tail}` : '',
+      row.stderr_tail ? `stderr:\n${row.stderr_tail}` : '',
+    ].filter(Boolean);
+    const outputText = outputLines.join('\n\n') || '-';
+    const statusText = row.ok ? t('operationHistory.status.success') : t('operationHistory.status.failed');
+
+    return `
+      <tr>
+        <td class="mono">${escapeHtml(formatLocalTimestamp(row.timestamp))}</td>
+        <td>${escapeHtml(opLabel)}</td>
+        <td class="mono">${escapeHtml(optionsText)}</td>
+        <td class="history-command">${escapeHtml(commandText)}</td>
+        <td class="mono">${escapeHtml(row.exit_code)}</td>
+        <td><span class="${toOkTag(Boolean(row.ok))}">${escapeHtml(statusText)}</span></td>
+        <td><div class="history-output">${escapeHtml(outputText)}</div></td>
+      </tr>
+    `;
+  }).join('');
+}
+
 async function loadCurrentView() {
   try {
     if (state.activeView === 'action-center') await loadActionCenter();
@@ -425,6 +815,7 @@ async function loadCurrentView() {
     if (state.activeView === 'runs') await loadRuns();
     if (state.activeView === 'alerts-ops') await loadAlertsOps();
     if (state.activeView === 'quality') await loadQuality();
+    if (state.activeView === 'operation-history') await loadOperationHistory();
     if (state.activeView === 'config') await loadConfig();
   } catch (err) {
     notify(err.message || String(err), true);
@@ -452,12 +843,36 @@ async function bindActions() {
     notify(token ? t('token.saved') : t('token.cleared'));
   });
 
+  byId('agentModeSwitch').addEventListener('click', (e) => {
+    const btn = e.target.closest('.agent-mode');
+    if (!btn) return;
+    setAgentMode(btn.dataset.agentMode, { persist: true });
+  });
+
+  byId('agentOperationSelect').addEventListener('change', (e) => {
+    state.agentOperationId = String(e.target.value || '').trim();
+    localStorage.setItem(AGENT_OPERATION_STORAGE_KEY, state.agentOperationId);
+    renderAgentOperationOptions();
+  });
+
+  byId('agentClearBtn').addEventListener('click', () => {
+    state.agentHistory = [];
+    renderAgentConversation();
+    notify(t('agent.history.cleared'));
+  });
+
+  byId('agentForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await submitAgentInteraction();
+  });
+
   byId('refreshActionCenterBtn').addEventListener('click', loadActionCenter);
   byId('refreshProposalBtn').addEventListener('click', loadProposals);
   byId('refreshExecutionBtn').addEventListener('click', loadExecutions);
   byId('refreshRunsBtn').addEventListener('click', loadRuns);
   byId('refreshOpsBtn').addEventListener('click', loadAlertsOps);
   byId('refreshQualityBtn').addEventListener('click', loadQuality);
+  byId('refreshOperationHistoryBtn').addEventListener('click', loadOperationHistory);
   byId('refreshConfigBtn').addEventListener('click', loadConfig);
 
   byId('reviewForm').addEventListener('submit', async (e) => {
@@ -535,6 +950,10 @@ async function bindActions() {
 
   const token = getToken();
   if (token) byId('apiTokenInput').value = token;
+  setAgentMode(state.agentMode, { persist: false });
+  renderAgentOperationSelect();
+  renderAgentOperationOptions();
+  renderAgentConversation();
 }
 
 window.setView = setView;
@@ -544,10 +963,18 @@ window.selectRun = selectRun;
 window.readArtifact = readArtifact;
 
 state.locale = detectInitialLocale();
+state.agentMode = detectInitialAgentMode();
+state.agentOperationId = detectInitialAgentOperationId();
 
 async function bootstrap() {
   try {
     await ensureLocaleDicts(state.locale);
+  } catch (err) {
+    notify(err.message || String(err), true);
+  }
+
+  try {
+    await loadAgentOperationSpecs();
   } catch (err) {
     notify(err.message || String(err), true);
   }
