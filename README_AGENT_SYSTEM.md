@@ -30,6 +30,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_scheduler.py --once --skip-feedback --skip-skill-promotion`
 - Scheduler once without alert channel hook:
   - `python3 agent_scheduler.py --once --skip-alerts`
+- Scheduler once without notifier hook:
+  - `python3 agent_scheduler.py --once --skip-notifier`
 - Manual review (approve/hold/reject):
   - `python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_name --note "approved after manual check"`
 - Execute approved task and update state:
@@ -50,6 +52,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_skill_manager.py`
 - Refresh operational alert channel:
   - `python3 agent_alerts.py`
+- Push alert events to ntfy:
+  - `python3 agent_notifier.py --enabled --ntfy-enabled --ntfy-topic <YOUR_TOPIC>`
 - Refresh operations action center:
   - `python3 agent_action_center.py`
 - Start integrated WebUI + API console:
@@ -147,6 +151,7 @@ This document describes the first build milestone of the daily investment agent 
   - `--skip-feedback`: skip proposal quality scoring / feedback refresh
   - `--skip-skill-promotion`: skip auto skill promotion refresh
   - `--skip-alerts`: skip alert channel refresh
+  - `--skip-notifier`: skip ntfy notifier refresh
   - `--skip-action-center`: skip action center refresh
   - `--ops-on-idle`: refresh ops report even when no phase is due
 - Ops report queue metrics include:

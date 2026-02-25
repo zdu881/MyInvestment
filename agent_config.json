@@ -75,5 +75,18 @@
     "max_review_items": 8,
     "max_execution_items": 8,
     "max_alerts": 8
+  },
+  "notifications": {
+    "enabled": false,
+    "send_events": "opened,escalated,resolved",
+    "send_levels": "warn,critical",
+    "cooldown_minutes": 30,
+    "max_events": 200,
+    "ntfy": {
+      "enabled": true,
+      "base_url": "https://ntfy.sh",
+      "topic": "",
+      "timeout_sec": 8.0
+    }
   }
 }

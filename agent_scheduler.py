@@ -230,6 +230,61 @@ def run_action_center(cfg: Dict) -> int:
     return proc.returncode
 
 
+def run_notifier(cfg: Dict, dry_run: bool) -> int:
+    notifications_cfg = (
+        cfg.get("notifications", {})
+        if isinstance(cfg.get("notifications", {}), dict)
+        else {}
+    )
+    if not bool(notifications_cfg.get("enabled", False)):
+        print("[INFO] notifier is disabled in config")
+        return 0
+
+    paths = cfg.get("paths", {}) if isinstance(cfg.get("paths", {}), dict) else {}
+    state_root = str(paths.get("state_root", "state"))
+    ntfy_cfg = (
+        notifications_cfg.get("ntfy", {})
+        if isinstance(notifications_cfg.get("ntfy", {}), dict)
+        else {}
+    )
+
+    cmd = [
+        sys.executable,
+        "agent_notifier.py",
+        "--enabled",
+        "--state-root",
+        state_root,
+        "--events-path",
+        f"{state_root}/alerts_events.jsonl",
+        "--cursor-path",
+        f"{state_root}/notify_cursor.json",
+        "--dedupe-path",
+        f"{state_root}/notify_dedupe.json",
+        "--delivery-log",
+        f"{state_root}/notify_delivery_log.jsonl",
+        "--send-events",
+        str(notifications_cfg.get("send_events", "opened,escalated,resolved")),
+        "--send-levels",
+        str(notifications_cfg.get("send_levels", "warn,critical")),
+        "--cooldown-minutes",
+        str(int(notifications_cfg.get("cooldown_minutes", 30))),
+        "--max-events",
+        str(int(notifications_cfg.get("max_events", 200))),
+        "--ntfy-base-url",
+        str(ntfy_cfg.get("base_url", "https://ntfy.sh")),
+        "--ntfy-topic",
+        str(ntfy_cfg.get("topic", "")),
+        "--ntfy-timeout-sec",
+        str(float(ntfy_cfg.get("timeout_sec", 8.0))),
+    ]
+    if bool(ntfy_cfg.get("enabled", True)):
+        cmd.append("--ntfy-enabled")
+    if dry_run:
+        cmd.append("--dry-run")
+    proc = subprocess.run(cmd)
+    return proc.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run due phase for agent system")
     parser.add_argument("--config", default="agent_config.json")
@@ -240,6 +295,7 @@ def main() -> int:
     parser.add_argument("--skip-feedback", action="store_true")
     parser.add_argument("--skip-skill-promotion", action="store_true")
     parser.add_argument("--skip-alerts", action="store_true")
+    parser.add_argument("--skip-notifier", action="store_true")
     parser.add_argument("--skip-action-center", action="store_true")
     parser.add_argument("--ops-on-idle", action="store_true")
     parser.add_argument("--ops-days", type=int, default=7)
@@ -334,6 +390,13 @@ def main() -> int:
                 print("[ERROR] alert channel refresh failed")
                 return ret
             print("[INFO] alert channel refreshed")
+
+        if not args.skip_notifier:
+            ret = run_notifier(cfg, args.dry_run)
+            if ret != 0:
+                print("[ERROR] notifier refresh failed")
+                return ret
+            print("[INFO] notifier refreshed")
 
         if not args.skip_action_center:
             ret = run_action_center(cfg)
