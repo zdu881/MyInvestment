@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -47,6 +48,7 @@ class AgentInteractRequest(BaseModel):
     confirm: bool = False
     operation_id: str | None = Field(default=None, max_length=80)
     operation_options: dict[str, Any] = Field(default_factory=dict)
+    confirmation_id: str | None = Field(default=None, max_length=80)
 
 
 CommandRunner = Callable[[list[str], Path, int], CommandResult]
@@ -437,6 +439,161 @@ def _operation_help_text() -> str:
     )
 
 
+_OPERATION_CONFIRM_TTL_SEC = 300
+_OPERATION_EXEC_COOLDOWN_SEC = 30
+
+
+def _safe_parse_ts(text: str) -> datetime | None:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _operation_guard_path(repo: FileRepo) -> Path:
+    return repo.state_root / "agent_operation_guard.json"
+
+
+def _read_operation_guard(repo: FileRepo) -> dict[str, Any]:
+    data = repo.read_json(_operation_guard_path(repo), default={})
+    pending = data.get("pending", {})
+    last_exec = data.get("last_exec", {})
+    if not isinstance(pending, dict):
+        pending = {}
+    if not isinstance(last_exec, dict):
+        last_exec = {}
+    return {"pending": pending, "last_exec": last_exec}
+
+
+def _write_operation_guard(repo: FileRepo, guard: dict[str, Any]) -> None:
+    repo.write_json(_operation_guard_path(repo), guard)
+
+
+def _operation_fingerprint(operation_id: str, options: dict[str, Any] | None) -> str:
+    payload = json.dumps(options or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"{operation_id}|{payload}"
+
+
+def _cleanup_operation_guard(guard: dict[str, Any], now_utc: datetime) -> None:
+    pending = guard.get("pending", {})
+    to_delete: list[str] = []
+    for key, row in pending.items():
+        if not isinstance(row, dict):
+            to_delete.append(str(key))
+            continue
+        expires_at = _safe_parse_ts(str(row.get("expires_at", "")))
+        if expires_at is None or expires_at < now_utc:
+            to_delete.append(str(key))
+    for key in to_delete:
+        pending.pop(key, None)
+
+
+def _issue_operation_confirmation(
+    repo: FileRepo,
+    *,
+    operation_id: str,
+    options: dict[str, Any],
+    user: str,
+) -> dict[str, Any]:
+    now_utc = datetime.now(timezone.utc)
+    guard = _read_operation_guard(repo)
+    _cleanup_operation_guard(guard, now_utc)
+
+    confirmation_id = uuid4().hex
+    expires_at = now_utc + timedelta(seconds=_OPERATION_CONFIRM_TTL_SEC)
+    guard["pending"][confirmation_id] = {
+        "operation_id": operation_id,
+        "fingerprint": _operation_fingerprint(operation_id, options),
+        "created_at": now_utc.isoformat(timespec="seconds"),
+        "expires_at": expires_at.isoformat(timespec="seconds"),
+        "user": user,
+    }
+    _write_operation_guard(repo, guard)
+    return {
+        "required": True,
+        "confirmation_id": confirmation_id,
+        "expires_at": expires_at.isoformat(timespec="seconds"),
+        "cooldown_sec": _OPERATION_EXEC_COOLDOWN_SEC,
+    }
+
+
+def _validate_and_consume_operation_confirmation(
+    repo: FileRepo,
+    *,
+    confirmation_id: str,
+    operation_id: str,
+    options: dict[str, Any],
+) -> tuple[bool, str]:
+    now_utc = datetime.now(timezone.utc)
+    guard = _read_operation_guard(repo)
+    _cleanup_operation_guard(guard, now_utc)
+    pending = guard.get("pending", {})
+    row = pending.get(confirmation_id)
+    if not isinstance(row, dict):
+        _write_operation_guard(repo, guard)
+        return False, "confirmation id is missing or expired; please preview again"
+
+    expected_op = str(row.get("operation_id", ""))
+    if expected_op != operation_id:
+        pending.pop(confirmation_id, None)
+        _write_operation_guard(repo, guard)
+        return False, "confirmation does not match selected operation"
+
+    expected_fingerprint = str(row.get("fingerprint", ""))
+    actual_fingerprint = _operation_fingerprint(operation_id, options)
+    if expected_fingerprint != actual_fingerprint:
+        pending.pop(confirmation_id, None)
+        _write_operation_guard(repo, guard)
+        return False, "confirmation does not match selected operation options"
+
+    pending.pop(confirmation_id, None)
+    _write_operation_guard(repo, guard)
+    return True, ""
+
+
+def _check_operation_cooldown(
+    repo: FileRepo,
+    *,
+    operation_id: str,
+    options: dict[str, Any],
+) -> tuple[bool, int]:
+    now_utc = datetime.now(timezone.utc)
+    guard = _read_operation_guard(repo)
+    _cleanup_operation_guard(guard, now_utc)
+    key = _operation_fingerprint(operation_id, options)
+    last_exec = _safe_parse_ts(str(guard.get("last_exec", {}).get(key, "")))
+    if last_exec is None:
+        _write_operation_guard(repo, guard)
+        return True, 0
+
+    elapsed = int((now_utc - last_exec).total_seconds())
+    remain = _OPERATION_EXEC_COOLDOWN_SEC - elapsed
+    if remain > 0:
+        _write_operation_guard(repo, guard)
+        return False, remain
+    _write_operation_guard(repo, guard)
+    return True, 0
+
+
+def _mark_operation_executed(
+    repo: FileRepo,
+    *,
+    operation_id: str,
+    options: dict[str, Any],
+) -> None:
+    guard = _read_operation_guard(repo)
+    _cleanup_operation_guard(guard, datetime.now(timezone.utc))
+    key = _operation_fingerprint(operation_id, options)
+    guard["last_exec"][key] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _write_operation_guard(repo, guard)
+
+
 def _operation_history_path(repo: FileRepo) -> Path:
     return repo.state_root / "agent_operation_history.jsonl"
 
@@ -759,6 +916,7 @@ def create_app(
         snapshot = _agent_snapshot(repo)
         command_result: CommandResult | None = None
         operation_payload: dict[str, Any] | None = None
+        confirmation_payload: dict[str, Any] | None = None
         ok = True
 
         if mode == "ask":
@@ -792,38 +950,91 @@ def create_app(
                     "executed": False,
                 }
                 if body.confirm:
-                    command_result = runner(operation_spec["command"], cfg.root_dir, cfg.command_timeout_sec)
-                    operation_payload["executed"] = True
-                    operation_payload["exit_code"] = command_result.exit_code
-                    operation_payload["stdout_tail"] = command_result.stdout_tail
-                    operation_payload["stderr_tail"] = command_result.stderr_tail
-                    ok = command_result.ok
-                    _append_operation_history(
-                        repo=repo,
-                        user=user,
-                        message=message,
-                        operation_payload=operation_payload,
-                        command_result=command_result,
-                    )
-                    reply_lines = [
-                        f"已执行操作: {operation_spec['label']}",
-                        f"exit_code={command_result.exit_code}",
-                    ]
-                    if command_result.stdout_tail:
-                        reply_lines.append("")
-                        reply_lines.append("stdout_tail:")
-                        reply_lines.append(command_result.stdout_tail)
-                    if command_result.stderr_tail:
-                        reply_lines.append("")
-                        reply_lines.append("stderr_tail:")
-                        reply_lines.append(command_result.stderr_tail)
-                    reply = "\n".join(reply_lines)
+                    confirmation_id = str(body.confirmation_id or "").strip()
+                    if not confirmation_id:
+                        ok = False
+                        reply = "operation execute requires confirmation_id; please preview first"
+                        confirmation_payload = {
+                            "required": True,
+                            "missing": True,
+                            "cooldown_sec": _OPERATION_EXEC_COOLDOWN_SEC,
+                        }
+                    else:
+                        confirmation_ok, confirmation_msg = _validate_and_consume_operation_confirmation(
+                            repo=repo,
+                            confirmation_id=confirmation_id,
+                            operation_id=operation_spec["id"],
+                            options=operation_spec.get("options", {}),
+                        )
+                        if not confirmation_ok:
+                            ok = False
+                            reply = confirmation_msg
+                            confirmation_payload = {
+                                "required": True,
+                                "invalid": True,
+                                "cooldown_sec": _OPERATION_EXEC_COOLDOWN_SEC,
+                            }
+                        else:
+                            cooldown_ok, cooldown_remain_sec = _check_operation_cooldown(
+                                repo=repo,
+                                operation_id=operation_spec["id"],
+                                options=operation_spec.get("options", {}),
+                            )
+                            if not cooldown_ok:
+                                ok = False
+                                reply = f"operation is in cooldown, retry after {cooldown_remain_sec}s"
+                                confirmation_payload = {
+                                    "required": True,
+                                    "cooldown": True,
+                                    "retry_after_sec": cooldown_remain_sec,
+                                }
+                            else:
+                                command_result = runner(operation_spec["command"], cfg.root_dir, cfg.command_timeout_sec)
+                                operation_payload["executed"] = True
+                                operation_payload["exit_code"] = command_result.exit_code
+                                operation_payload["stdout_tail"] = command_result.stdout_tail
+                                operation_payload["stderr_tail"] = command_result.stderr_tail
+                                ok = command_result.ok
+                                if command_result.ok:
+                                    _mark_operation_executed(
+                                        repo=repo,
+                                        operation_id=operation_spec["id"],
+                                        options=operation_spec.get("options", {}),
+                                    )
+                                _append_operation_history(
+                                    repo=repo,
+                                    user=user,
+                                    message=message,
+                                    operation_payload=operation_payload,
+                                    command_result=command_result,
+                                )
+                                reply_lines = [
+                                    f"已执行操作: {operation_spec['label']}",
+                                    f"exit_code={command_result.exit_code}",
+                                ]
+                                if command_result.stdout_tail:
+                                    reply_lines.append("")
+                                    reply_lines.append("stdout_tail:")
+                                    reply_lines.append(command_result.stdout_tail)
+                                if command_result.stderr_tail:
+                                    reply_lines.append("")
+                                    reply_lines.append("stderr_tail:")
+                                    reply_lines.append(command_result.stderr_tail)
+                                reply = "\n".join(reply_lines)
                 else:
+                    confirmation_payload = _issue_operation_confirmation(
+                        repo=repo,
+                        operation_id=operation_spec["id"],
+                        options=operation_spec.get("options", {}),
+                        user=user,
+                    )
                     reply = "\n".join(
                         [
                             f"已识别操作: {operation_spec['label']}",
                             f"command: {' '.join(operation_spec['command'])}",
-                            "当前为预览模式。勾选 confirm 后将实际执行。",
+                            f"confirmation_id: {confirmation_payload['confirmation_id']}",
+                            f"expires_at: {confirmation_payload['expires_at']}",
+                            "当前为预览模式。勾选 confirm 后携带 confirmation_id 执行。",
                         ]
                     )
 
@@ -834,6 +1045,7 @@ def create_app(
                 "mode": mode,
                 "message": message,
                 "confirm": body.confirm,
+                "confirmation_id": body.confirmation_id,
                 "ok": ok,
                 "operation_options": body.operation_options,
                 "operation_id": operation_payload["id"] if operation_payload else "",
@@ -847,6 +1059,7 @@ def create_app(
             "mode": mode,
             "reply": reply,
             "operation": operation_payload,
+            "confirmation": confirmation_payload,
             "snapshot": snapshot,
         }
 

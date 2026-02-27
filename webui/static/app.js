@@ -21,6 +21,7 @@ const state = {
   agentMode: 'ask',
   agentOperationId: '',
   agentOperationSpecs: [],
+  agentConfirmation: null,
   agentHistory: [],
   operationHistory: [],
   proposals: [],
@@ -141,6 +142,7 @@ function applyI18nToDom() {
   }
 
   setAgentMode(state.agentMode, { persist: false });
+  renderAgentConfirmation();
   renderAgentConversation();
 }
 
@@ -368,6 +370,19 @@ function getAgentOperationPromptFallback(spec, options) {
   return `${getAgentOperationLabel(spec)}${suffix}`;
 }
 
+function renderAgentConfirmation() {
+  const idNode = byId('agentConfirmationId');
+  const expireNode = byId('agentConfirmationExpire');
+  if (!idNode || !expireNode) return;
+
+  const payload = state.agentConfirmation || {};
+  const confirmationId = String(payload.confirmation_id || '').trim();
+  const expiresAt = String(payload.expires_at || '').trim();
+
+  idNode.textContent = confirmationId || '-';
+  expireNode.textContent = expiresAt ? formatLocalTimestamp(expiresAt) : '-';
+}
+
 async function loadAgentOperationSpecs() {
   const resp = await request('/api/agent/operations');
   const items = Array.isArray(resp.items) ? resp.items : [];
@@ -417,6 +432,7 @@ function setAgentMode(mode, options = {}) {
   if (state.agentMode === 'operation') {
     renderAgentOperationSelect();
     renderAgentOperationOptions();
+    renderAgentConfirmation();
   }
 }
 
@@ -488,6 +504,14 @@ async function submitAgentInteraction() {
       message = getAgentOperationPromptFallback(spec, options);
       payload.message = message;
     }
+    if (confirm) {
+      const confirmationId = String(state.agentConfirmation?.confirmation_id || '').trim();
+      if (!confirmationId) {
+        notify(t('agent.confirmation.missing'), true);
+        return;
+      }
+      payload.confirmation_id = confirmationId;
+    }
   } else if (!message) {
     notify(t('agent.prompt.required'), true);
     return;
@@ -501,6 +525,15 @@ async function submitAgentInteraction() {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+
+    if (mode === 'operation') {
+      if (!confirm && resp.confirmation?.confirmation_id) {
+        state.agentConfirmation = resp.confirmation;
+      } else if (confirm) {
+        state.agentConfirmation = null;
+      }
+      renderAgentConfirmation();
+    }
 
     state.agentHistory.unshift({
       created_at: new Date().toISOString(),
@@ -852,7 +885,14 @@ async function bindActions() {
   byId('agentOperationSelect').addEventListener('change', (e) => {
     state.agentOperationId = String(e.target.value || '').trim();
     localStorage.setItem(AGENT_OPERATION_STORAGE_KEY, state.agentOperationId);
+    state.agentConfirmation = null;
     renderAgentOperationOptions();
+    renderAgentConfirmation();
+  });
+
+  byId('agentOperationOptions').addEventListener('change', () => {
+    state.agentConfirmation = null;
+    renderAgentConfirmation();
   });
 
   byId('agentClearBtn').addEventListener('click', () => {
@@ -953,6 +993,7 @@ async function bindActions() {
   setAgentMode(state.agentMode, { persist: false });
   renderAgentOperationSelect();
   renderAgentOperationOptions();
+  renderAgentConfirmation();
   renderAgentConversation();
 }
 

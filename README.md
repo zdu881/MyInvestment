@@ -198,6 +198,12 @@ python3 agent_skill_manager.py
 - `POST /api/agent/interact`
 - `PATCH /api/config`
 
+`POST /api/agent/interact` 在 `operation` 模式下为两步执行：
+1. 先 `confirm=false` 预览并获取 `confirmation_id`
+2. 再 `confirm=true` 且携带 `confirmation_id` 执行
+
+同时同一 `operation_id + options` 在短时间内有冷却保护（默认 30 秒）。
+
 ### 6.3 审计
 
 所有写操作会写入：

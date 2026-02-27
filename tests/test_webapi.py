@@ -206,11 +206,25 @@ def test_agent_interact_modes(tmp_path: Path) -> None:
     preview_payload = preview_resp.json()
     assert preview_payload["ok"] is True
     assert preview_payload["operation"]["executed"] is False
+    confirmation_id = preview_payload["confirmation"]["confirmation_id"]
+    assert confirmation_id
 
     before_calls = len(calls)
-    execute_resp = client.post(
+    no_confirm_resp = client.post(
         "/api/agent/interact",
         json={"mode": "operation", "message": "refresh alerts", "confirm": True},
+    )
+    assert no_confirm_resp.status_code == 200
+    assert no_confirm_resp.json()["ok"] is False
+
+    execute_resp = client.post(
+        "/api/agent/interact",
+        json={
+            "mode": "operation",
+            "message": "refresh alerts",
+            "confirm": True,
+            "confirmation_id": confirmation_id,
+        },
     )
     assert execute_resp.status_code == 200
     execute_payload = execute_resp.json()
@@ -219,6 +233,43 @@ def test_agent_interact_modes(tmp_path: Path) -> None:
     assert len(calls) == before_calls + 1
     assert "agent_alerts.py" in " ".join(calls[-1])
 
+    preview_again_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "operation", "message": "refresh alerts", "confirm": False},
+    )
+    assert preview_again_resp.status_code == 200
+    confirmation_id_again = preview_again_resp.json()["confirmation"]["confirmation_id"]
+    cooldown_resp = client.post(
+        "/api/agent/interact",
+        json={
+            "mode": "operation",
+            "message": "refresh alerts",
+            "confirm": True,
+            "confirmation_id": confirmation_id_again,
+        },
+    )
+    assert cooldown_resp.status_code == 200
+    assert cooldown_resp.json()["ok"] is False
+    assert "cooldown" in str(cooldown_resp.json()["reply"]).lower()
+
+    scheduler_preview_resp = client.post(
+        "/api/agent/interact",
+        json={
+            "mode": "operation",
+            "message": "",
+            "confirm": False,
+            "operation_id": "scheduler_once",
+            "operation_options": {
+                "dry_run": True,
+                "skip_maintenance": True,
+                "skip_alerts": True,
+                "skip_notifier": True,
+            },
+        },
+    )
+    assert scheduler_preview_resp.status_code == 200
+    scheduler_confirmation_id = scheduler_preview_resp.json()["confirmation"]["confirmation_id"]
+
     structured_resp = client.post(
         "/api/agent/interact",
         json={
@@ -226,6 +277,7 @@ def test_agent_interact_modes(tmp_path: Path) -> None:
             "message": "",
             "confirm": True,
             "operation_id": "scheduler_once",
+            "confirmation_id": scheduler_confirmation_id,
             "operation_options": {
                 "dry_run": True,
                 "skip_maintenance": True,

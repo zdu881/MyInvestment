@@ -203,6 +203,15 @@ body {
   gap: 8px;
 }
 
+.agent-confirm-info {
+  border: 1px solid rgba(130, 170, 210, 0.25);
+  border-radius: 8px;
+  padding: 7px;
+  background: rgba(10, 16, 24, 0.8);
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .agent-actions {
   display: flex;
   align-items: center;
