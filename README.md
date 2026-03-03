@@ -22,6 +22,7 @@
 
 ```text
 MyInvestment/
+├── agent_init_state.py             # 入场初始化（账户/状态重置）
 ├── agent_system.py                 # 主运行入口（多阶段）
 ├── agent_scheduler.py              # 调度入口（--once）
 ├── agent_review.py                 # 人工审核命令
@@ -87,7 +88,32 @@ MyInvestment/
 
 打开：`http://localhost:8787/`
 
-### 4.2 最小 CLI 流程
+### 4.2 首次入场初始化（推荐）
+
+```bash
+# 1) 初始化账户状态，并清空测试产物（首次入场推荐）
+python3 agent_init_state.py \
+  --initial-capital 100000 \
+  --risk-profile defensive \
+  --reset-runtime \
+  --reset-knowledge \
+  --reset-watchlist
+
+# 2) 如需导入自选池，可传入 seed 文件（CSV 列可含 ticker/name/reason/priority/status）
+python3 agent_init_state.py \
+  --initial-capital 100000 \
+  --reset-runtime \
+  --seed-watchlist /path/to/watchlist_seed.csv
+```
+
+说明：
+- 默认会把 `state/account_snapshot.json` 重置为“全现金、空仓位”。
+- 会重建 `state/current_positions.csv` 的空表头。
+- 加 `--reset-runtime` 会清理 `runs/`、队列、历史日志，适合把测试环境切回“未入场”。
+- 若检测到已有运行痕迹，脚本会要求你显式使用 `--reset-runtime` 或 `--force`，避免误覆盖。
+- 可先加 `--dry-run` 预览要执行的清理动作。
+
+### 4.3 最小 CLI 流程
 
 ```bash
 # 1) 全流程演练（不改状态）
@@ -100,7 +126,7 @@ python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_nam
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run
 ```
 
-### 4.3 调度一次
+### 4.4 调度一次
 
 ```bash
 python3 agent_scheduler.py --once
@@ -118,7 +144,15 @@ python3 agent_scheduler.py --once --skip-notifier
 
 ## 5. 常用命令清单
 
-### 5.1 运行阶段
+### 5.1 初始化与入场
+
+```bash
+python3 agent_init_state.py --initial-capital 100000 --reset-runtime --reset-watchlist
+python3 agent_init_state.py --initial-capital 200000 --seed-watchlist /path/to/watchlist_seed.csv
+python3 agent_init_state.py --dry-run --reset-runtime
+```
+
+### 5.2 运行阶段
 
 ```bash
 python3 agent_system.py --phase preopen
@@ -127,7 +161,7 @@ python3 agent_system.py --phase postclose
 python3 agent_system.py --phase all
 ```
 
-### 5.2 审核与执行
+### 5.3 审核与执行
 
 ```bash
 python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_name --note "..."
@@ -139,7 +173,7 @@ python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force
 ```
 
-### 5.3 运维与反馈
+### 5.4 运维与反馈
 
 ```bash
 python3 agent_ops_report.py --days 7
