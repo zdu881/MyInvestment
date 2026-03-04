@@ -20,6 +20,7 @@ tags:
   - name: Reviews
   - name: Executions
   - name: Scheduler
+  - name: Onboarding
   - name: Config
 
 paths:
@@ -405,6 +406,31 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ActionResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/onboarding/init:
+    post:
+      tags: [Onboarding]
+      summary: Initialize onboarding state for first capital entry
+      operationId: runOnboardingInit
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardingInitRequest'
+      responses:
+        '200':
+          description: onboarding init command executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1009,6 +1035,55 @@ components:
           minimum: 1
           default: 30
 
+    OnboardingInitRequest:
+      type: object
+      properties:
+        initial_capital:
+          type: number
+          exclusiveMinimum: 0
+          default: 100000
+        risk_profile:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: defensive
+        max_single_weight:
+          oneOf:
+            - type: number
+              exclusiveMinimum: 0
+              maximum: 1
+            - type: 'null'
+        max_industry_weight:
+          oneOf:
+            - type: number
+              exclusiveMinimum: 0
+              maximum: 1
+            - type: 'null'
+        min_cash_ratio:
+          oneOf:
+            - type: number
+              minimum: 0
+              exclusiveMaximum: 1
+            - type: 'null'
+        reset_runtime:
+          type: boolean
+          default: false
+        reset_knowledge:
+          type: boolean
+          default: false
+        reset_watchlist:
+          type: boolean
+          default: false
+        seed_watchlist:
+          type: string
+          default: ""
+        force:
+          type: boolean
+          default: false
+        dry_run:
+          type: boolean
+          default: true
+
     OpsReport:
       type: object
       required:
@@ -1095,4 +1170,3 @@ components:
           items:
             type: object
             additionalProperties: true
-

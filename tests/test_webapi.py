@@ -355,6 +355,7 @@ def _build_client(tmp_path: Path) -> tuple[TestClient, list[list[str]], AppSetti
 
 def _copy_runtime_scripts(repo_root: Path, workspace_root: Path) -> None:
     script_names = [
+        "agent_init_state.py",
         "agent_review.py",
         "agent_execute.py",
         "agent_scheduler.py",
@@ -473,6 +474,25 @@ def test_mutation_endpoints_and_config_patch(tmp_path: Path) -> None:
     assert sched_resp.status_code == 200
     assert "agent_scheduler.py" in " ".join(calls[-1])
 
+    onboarding_resp = client.post(
+        "/api/onboarding/init",
+        json={
+            "initial_capital": 120000,
+            "risk_profile": "balanced",
+            "reset_runtime": True,
+            "reset_watchlist": True,
+            "dry_run": True,
+        },
+    )
+    assert onboarding_resp.status_code == 200
+    onboarding_cmd = " ".join(calls[-1])
+    assert "agent_init_state.py" in onboarding_cmd
+    assert "--initial-capital 120000.0" in onboarding_cmd
+    assert "--risk-profile balanced" in onboarding_cmd
+    assert "--reset-runtime" in onboarding_cmd
+    assert "--reset-watchlist" in onboarding_cmd
+    assert "--dry-run" in onboarding_cmd
+
     patch_resp = client.patch("/api/config", json={"action_center": {"max_alerts": 5}})
     assert patch_resp.status_code == 200
     cfg = client.get("/api/config").json()
@@ -480,7 +500,7 @@ def test_mutation_endpoints_and_config_patch(tmp_path: Path) -> None:
 
     audit_path = settings.state_root / "webui_audit_log.jsonl"
     assert audit_path.exists()
-    assert len(audit_path.read_text(encoding="utf-8").strip().splitlines()) >= 4
+    assert len(audit_path.read_text(encoding="utf-8").strip().splitlines()) >= 5
 
 
 def test_agent_interact_modes(tmp_path: Path) -> None:
@@ -658,3 +678,14 @@ def test_real_command_runner_flow(tmp_path: Path) -> None:
         json={"dry_run": True, "skip_maintenance": True},
     )
     assert scheduler_resp.status_code == 200
+
+    onboarding_resp = client.post(
+        "/api/onboarding/init",
+        json={
+            "initial_capital": 110000,
+            "risk_profile": "defensive",
+            "dry_run": True,
+            "force": True,
+        },
+    )
+    assert onboarding_resp.status_code == 200

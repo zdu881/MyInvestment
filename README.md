@@ -17,6 +17,7 @@
 - WebUI 一站式入口：Action Center -> Review -> Execution -> Runs -> Ops
 - 前端 i18n：`zh-CN` / `en-US`，语言切换持久化
 - Agent 交互栏：`ask` / `plan` / `operation` 三模式（含 operation 预览与执行）
+- 入场初始化面板：在 WebUI `State & Config` 中可触发 `onboarding init`（支持 dry-run）
 
 ## 2. 项目结构
 
@@ -229,6 +230,7 @@ python3 agent_skill_manager.py
 - `POST /api/reviews/{run_id}`
 - `POST /api/executions/{run_id}`
 - `POST /api/scheduler/once`
+- `POST /api/onboarding/init`
 - `POST /api/agent/interact`
 - `PATCH /api/config`
 

@@ -42,6 +42,20 @@ class SchedulerOnceRequest(BaseModel):
     feedback_days: int = Field(default=30, ge=1)
 
 
+class OnboardingInitRequest(BaseModel):
+    initial_capital: float = Field(default=100000.0, gt=0)
+    risk_profile: str = Field(default="defensive", min_length=1, max_length=64)
+    max_single_weight: float | None = Field(default=None, gt=0, le=1)
+    max_industry_weight: float | None = Field(default=None, gt=0, le=1)
+    min_cash_ratio: float | None = Field(default=None, ge=0, lt=1)
+    reset_runtime: bool = False
+    reset_knowledge: bool = False
+    reset_watchlist: bool = False
+    seed_watchlist: str = Field(default="", max_length=4000)
+    force: bool = False
+    dry_run: bool = True
+
+
 class AgentInteractRequest(BaseModel):
     mode: str = Field(pattern="^(ask|plan|operation)$")
     message: str = Field(default="", max_length=4000)
@@ -904,6 +918,58 @@ def create_app(
         }
         if not result.ok:
             raise _error("command_failed", "scheduler command failed", status=500, details=output)
+        return output
+
+    @app.post("/api/onboarding/init")
+    def onboarding_init(
+        body: OnboardingInitRequest,
+        user: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        command = [
+            sys.executable,
+            "agent_init_state.py",
+            "--initial-capital",
+            str(body.initial_capital),
+            "--risk-profile",
+            body.risk_profile,
+        ]
+        if body.max_single_weight is not None:
+            command.extend(["--max-single-weight", str(body.max_single_weight)])
+        if body.max_industry_weight is not None:
+            command.extend(["--max-industry-weight", str(body.max_industry_weight)])
+        if body.min_cash_ratio is not None:
+            command.extend(["--min-cash-ratio", str(body.min_cash_ratio)])
+        if body.reset_runtime:
+            command.append("--reset-runtime")
+        if body.reset_knowledge:
+            command.append("--reset-knowledge")
+        if body.reset_watchlist:
+            command.append("--reset-watchlist")
+        seed_watchlist = str(body.seed_watchlist or "").strip()
+        if seed_watchlist:
+            command.extend(["--seed-watchlist", seed_watchlist])
+        if body.force:
+            command.append("--force")
+        if body.dry_run:
+            command.append("--dry-run")
+
+        result = runner(command, cfg.root_dir, cfg.command_timeout_sec)
+        _audit(
+            repo=repo,
+            action="onboarding_init",
+            payload=body.model_dump(),
+            user=user,
+            command_result=result,
+        )
+        output = {
+            "ok": result.ok,
+            "command": result.command,
+            "exit_code": result.exit_code,
+            "stdout_tail": result.stdout_tail,
+            "stderr_tail": result.stderr_tail,
+        }
+        if not result.ok:
+            raise _error("command_failed", "onboarding init failed", status=500, details=output)
         return output
 
     @app.post("/api/agent/interact")

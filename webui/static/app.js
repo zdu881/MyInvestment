@@ -190,6 +190,16 @@ function getToken() {
   return localStorage.getItem('myinvestment_api_token') || '';
 }
 
+function parseOptionalFloatInput(inputId) {
+  const node = byId(inputId);
+  if (!node) return null;
+  const raw = String(node.value || '').trim();
+  if (!raw) return null;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) return NaN;
+  return parsed;
+}
+
 async function request(path, options = {}) {
   const token = getToken();
   const headers = { ...(options.headers || {}) };
@@ -983,6 +993,95 @@ async function bindActions() {
       notify(t('config.schedulerTriggered'));
       await loadActionCenter();
       await loadAlertsOps();
+    } catch (err) {
+      notify(err.message || String(err), true);
+    }
+  });
+
+  byId('onboardingInitForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const initialCapital = Number.parseFloat(String(byId('onboardingInitialCapital').value || ''));
+    if (!Number.isFinite(initialCapital) || initialCapital <= 0) {
+      notify(t('onboarding.initialCapitalInvalid'), true);
+      return;
+    }
+
+    const optionalKeys = [
+      {
+        inputId: 'onboardingMaxSingleWeight',
+        payloadKey: 'max_single_weight',
+        min: 0,
+        max: 1,
+        minInclusive: false,
+        maxInclusive: true,
+      },
+      {
+        inputId: 'onboardingMaxIndustryWeight',
+        payloadKey: 'max_industry_weight',
+        min: 0,
+        max: 1,
+        minInclusive: false,
+        maxInclusive: true,
+      },
+      {
+        inputId: 'onboardingMinCashRatio',
+        payloadKey: 'min_cash_ratio',
+        min: 0,
+        max: 1,
+        minInclusive: true,
+        maxInclusive: false,
+      },
+    ];
+
+    const payload = {
+      initial_capital: initialCapital,
+      risk_profile: byId('onboardingRiskProfile').value.trim() || 'defensive',
+      seed_watchlist: byId('onboardingSeedWatchlist').value.trim(),
+      dry_run: byId('onboardingDryRun').checked,
+      reset_runtime: byId('onboardingResetRuntime').checked,
+      reset_knowledge: byId('onboardingResetKnowledge').checked,
+      reset_watchlist: byId('onboardingResetWatchlist').checked,
+      force: byId('onboardingForce').checked,
+    };
+
+    for (const opt of optionalKeys) {
+      const { inputId, payloadKey, min, max, minInclusive, maxInclusive } = opt;
+      const parsed = parseOptionalFloatInput(inputId);
+      if (parsed === null) continue;
+      const minOk = minInclusive ? parsed >= min : parsed > min;
+      const maxOk = maxInclusive ? parsed <= max : parsed < max;
+      if (!Number.isFinite(parsed) || !minOk || !maxOk) {
+        notify(
+          t('onboarding.optionalRangeInvalid', {
+            field: payloadKey,
+            min: String(min),
+            max: String(max),
+          }),
+          true
+        );
+        return;
+      }
+      payload[payloadKey] = parsed;
+    }
+
+    if (
+      Number.isFinite(payload.max_single_weight)
+      && Number.isFinite(payload.max_industry_weight)
+      && payload.max_industry_weight < payload.max_single_weight
+    ) {
+      notify(t('onboarding.industryLtSingle'), true);
+      return;
+    }
+
+    try {
+      const resp = await request('/api/onboarding/init', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      byId('onboardingResult').textContent = JSON.stringify(resp, null, 2);
+      notify(t('onboarding.submitSuccess'));
+      await loadConfig().catch(() => {});
     } catch (err) {
       notify(err.message || String(err), true);
     }

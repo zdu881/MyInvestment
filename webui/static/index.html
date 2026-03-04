@@ -305,6 +305,84 @@
               </label>
               <button type="submit" class="btn" data-i18n="config.triggerScheduler">触发 Scheduler Once</button>
             </form>
+
+            <h3 data-i18n="config.onboardingInit">Onboarding Init</h3>
+            <form id="onboardingInitForm" class="form-card">
+              <label><span data-i18n="onboarding.initialCapital">Initial Capital</span>
+                <input
+                  id="onboardingInitialCapital"
+                  type="number"
+                  min="1"
+                  step="0.01"
+                  value="100000"
+                />
+              </label>
+              <label><span data-i18n="onboarding.riskProfile">Risk Profile</span>
+                <input id="onboardingRiskProfile" value="defensive" />
+              </label>
+              <label><span data-i18n="onboarding.maxSingleWeight">Max Single Weight (Optional)</span>
+                <input
+                  id="onboardingMaxSingleWeight"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.0001"
+                  placeholder="0.30"
+                  data-i18n-placeholder="onboarding.maxSingleWeightPlaceholder"
+                />
+              </label>
+              <label><span data-i18n="onboarding.maxIndustryWeight">Max Industry Weight (Optional)</span>
+                <input
+                  id="onboardingMaxIndustryWeight"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.0001"
+                  placeholder="0.50"
+                  data-i18n-placeholder="onboarding.maxIndustryWeightPlaceholder"
+                />
+              </label>
+              <label><span data-i18n="onboarding.minCashRatio">Min Cash Ratio (Optional)</span>
+                <input
+                  id="onboardingMinCashRatio"
+                  type="number"
+                  min="0"
+                  max="0.9999"
+                  step="0.0001"
+                  placeholder="0.10"
+                  data-i18n-placeholder="onboarding.minCashRatioPlaceholder"
+                />
+              </label>
+              <label><span data-i18n="onboarding.seedWatchlist">Seed Watchlist Path (Optional)</span>
+                <input
+                  id="onboardingSeedWatchlist"
+                  placeholder="/path/to/watchlist_seed.csv"
+                  data-i18n-placeholder="onboarding.seedWatchlistPlaceholder"
+                />
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="onboardingDryRun" checked />
+                <span data-i18n="onboarding.dryRun">dry-run preview</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="onboardingResetRuntime" />
+                <span data-i18n="onboarding.resetRuntime">reset runtime data</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="onboardingResetKnowledge" />
+                <span data-i18n="onboarding.resetKnowledge">reset knowledge runtime logs</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="onboardingResetWatchlist" />
+                <span data-i18n="onboarding.resetWatchlist">reset watchlist</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="onboardingForce" />
+                <span data-i18n="onboarding.force">force when runtime data exists</span>
+              </label>
+              <button type="submit" class="btn danger" data-i18n="onboarding.submit">执行初始化</button>
+            </form>
+            <pre id="onboardingResult" class="code-box"></pre>
           </article>
         </div>
       </section>
