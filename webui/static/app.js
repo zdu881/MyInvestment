@@ -200,6 +200,102 @@ function parseOptionalFloatInput(inputId) {
   return parsed;
 }
 
+function parseInfoLines(text) {
+  const src = String(text || '').trim();
+  if (!src) return [];
+  return src
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('[INFO] '))
+    .map((line) => line.slice('[INFO] '.length).trim())
+    .filter(Boolean);
+}
+
+function buildOnboardingSummary(resp, payload) {
+  const ok = Boolean(resp?.ok);
+  const command = Array.isArray(resp?.command) ? resp.command.join(' ') : '';
+  const exitCode = Number(resp?.exit_code ?? -1);
+  const stdout = String(resp?.stdout_tail || '').trim();
+  const stderr = String(resp?.stderr_tail || '').trim();
+  const infoLines = parseInfoLines(stdout);
+
+  const lines = [];
+  lines.push(`## ${t('onboarding.resultTitle')}`);
+  lines.push(`${t('onboarding.result.status')}: ${ok ? t('onboarding.result.success') : t('onboarding.result.failure')}`);
+  lines.push(`${t('onboarding.result.exitCode')}: ${exitCode}`);
+  if (command) {
+    lines.push(`${t('onboarding.result.command')}: ${command}`);
+  }
+
+  if (infoLines.length > 0) {
+    lines.push('');
+    lines.push(`${t('onboarding.result.output')}:`);
+    infoLines.forEach((line) => lines.push(`- ${line}`));
+  }
+
+  if (stderr) {
+    lines.push('');
+    lines.push('stderr:');
+    lines.push(stderr);
+  }
+
+  const nextSteps = [];
+  if (payload.dry_run) {
+    nextSteps.push(t('onboarding.next.apply'));
+  } else {
+    nextSteps.push(t('onboarding.next.refreshConfig'));
+    nextSteps.push(t('onboarding.next.scheduler'));
+    nextSteps.push(t('onboarding.next.actionCenter'));
+  }
+
+  lines.push('');
+  lines.push(`${t('onboarding.result.next')}:`);
+  nextSteps.forEach((step, idx) => {
+    lines.push(`${idx + 1}. ${step}`);
+  });
+
+  return lines.join('\n');
+}
+
+function renderOperatorGuide(overview = {}) {
+  const container = byId('operatorGuide');
+  if (!container) return;
+
+  const pendingReview = Number(overview.pending_review_count || 0);
+  const pendingExecution = Number(overview.pending_execution_count || 0);
+  const activeAlerts = Number(overview.active_alert_count || 0);
+  const hasRiskAlert = String(overview.alert_status || '').toLowerCase() === 'critical';
+
+  const steps = [];
+  if (activeAlerts > 0) {
+    const key = hasRiskAlert ? 'operator.guide.step.alertCritical' : 'operator.guide.step.alertWarn';
+    steps.push(t(key, { count: activeAlerts }));
+  }
+  if (pendingReview > 0) {
+    steps.push(t('operator.guide.step.review', { count: pendingReview }));
+  }
+  if (pendingExecution > 0) {
+    steps.push(t('operator.guide.step.execution', { count: pendingExecution }));
+  }
+
+  if (steps.length === 0) {
+    steps.push(t('operator.guide.step.onboarding'));
+    steps.push(t('operator.guide.step.scheduler'));
+    steps.push(t('operator.guide.step.observe'));
+  } else if (steps.length < 3) {
+    steps.push(t('operator.guide.step.scheduler'));
+    if (steps.length < 3) {
+      steps.push(t('operator.guide.step.observe'));
+    }
+  }
+
+  container.innerHTML = `
+    <ol class="operator-guide-list">
+      ${steps.slice(0, 3).map((step) => `<li class="operator-guide-item">${escapeHtml(step)}</li>`).join('')}
+    </ol>
+  `;
+}
+
 async function request(path, options = {}) {
   const token = getToken();
   const headers = { ...(options.headers || {}) };
@@ -592,6 +688,7 @@ function toOkTag(ok) {
 async function loadActionCenter() {
   const data = await request('/api/action-center');
   const o = data.overview || {};
+  renderOperatorGuide(o);
   const kpis = [
     [t('kpi.health'), `${o.health_score ?? '-'} (${o.health_label ?? '-'})`],
     [t('kpi.alerts'), `${o.alert_status ?? '-'} / ${o.active_alert_count ?? 0}`],
@@ -1044,6 +1141,16 @@ async function bindActions() {
       reset_watchlist: byId('onboardingResetWatchlist').checked,
       force: byId('onboardingForce').checked,
     };
+    const dangerousReset = (!payload.dry_run)
+      && (payload.reset_runtime || payload.reset_knowledge || payload.reset_watchlist);
+    if (dangerousReset) {
+      const dangerConfirmed = byId('onboardingDangerConfirm').checked;
+      const confirmText = String(byId('onboardingConfirmText').value || '').trim().toUpperCase();
+      if (!dangerConfirmed || confirmText !== 'INIT') {
+        notify(t('onboarding.confirmInvalid'), true);
+        return;
+      }
+    }
 
     for (const opt of optionalKeys) {
       const { inputId, payloadKey, min, max, minInclusive, maxInclusive } = opt;
@@ -1079,12 +1186,17 @@ async function bindActions() {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      byId('onboardingResult').textContent = JSON.stringify(resp, null, 2);
+      byId('onboardingResult').textContent = buildOnboardingSummary(resp, payload);
       notify(t('onboarding.submitSuccess'));
       await loadConfig().catch(() => {});
+      await loadActionCenter().catch(() => {});
     } catch (err) {
       notify(err.message || String(err), true);
     }
+  });
+
+  byId('operatorGuideGoConfigBtn').addEventListener('click', () => {
+    setView('config');
   });
 
   const token = getToken();

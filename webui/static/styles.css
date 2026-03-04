@@ -409,6 +409,37 @@ main {
   font-size: 15px;
 }
 
+.operator-guide-panel {
+  margin-bottom: 12px;
+  min-height: unset;
+}
+
+.operator-guide-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.operator-guide-subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.operator-guide-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.operator-guide-item {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .list {
   display: flex;
   flex-direction: column;
@@ -505,6 +536,31 @@ select {
   background: rgba(240, 93, 94, 0.22);
 }
 
+.danger-zone {
+  border: 1px solid rgba(240, 93, 94, 0.45);
+  border-radius: 10px;
+  background: rgba(50, 16, 20, 0.45);
+  padding: 10px;
+}
+
+.danger-zone h4 {
+  margin: 0;
+  font-size: 13px;
+  color: #ffc0c2;
+}
+
+.danger-zone-desc {
+  margin: 6px 0 8px;
+  color: #f7cfd1;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.danger-zone-rule {
+  margin: 8px 0 0;
+  color: #f7cfd1;
+}
+
 .tag {
   border-radius: 999px;
   padding: 2px 8px;
@@ -585,6 +641,10 @@ select {
   }
 
   .agent-head {
+    flex-direction: column;
+  }
+
+  .operator-guide-head {
     flex-direction: column;
   }
 
