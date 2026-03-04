@@ -12,6 +12,7 @@
 - 多阶段运行：`preopen` / `intraday` / `postclose` / `all`
 - 人工审核闭环：`approve` / `hold` / `reject`
 - 执行闭环：支持 `dry-run` 与 `force`，执行后状态与产物回写
+- 人工交易模式：`execution.manual_only=true` 时阻止非 dry-run 自动执行
 - 运维可观测：`ops_report`、`alerts`、`action_center`、`quality_feedback`
 - 技能沉淀：候选技能收集、晋升与版本化注册
 - WebUI 一站式入口：Action Center -> Review -> Execution -> Runs -> Ops
@@ -174,6 +175,11 @@ python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force
 ```
 
+如果你当前仅做手动交易，建议：
+- 保持 `agent_config.json` 的 `execution.manual_only=true`
+- 只运行 `agent_execute.py --dry-run` 用于生成执行前检查与成本评估
+- 按 `execution_orders.csv` 在券商端手动下单
+
 ### 5.4 运维与反馈
 
 ```bash
@@ -281,6 +287,90 @@ E2E 用例：
 
 若未安装 Playwright，该测试会自动 `skip`。
 
+### 7.3 Day-0 与 ntfy 验收测试（推荐）
+
+#### A) Day-0：系统如何给出“买什么、怎么下单”
+
+```bash
+# 0) 初始化为“全现金空仓”基线（先 dry-run 预览）
+python3 agent_init_state.py \
+  --initial-capital 100000 \
+  --reset-runtime \
+  --reset-knowledge \
+  --reset-watchlist \
+  --dry-run
+
+# 1) 生成 Day-0 提案（建议先 dry-run）
+python3 agent_system.py --phase postclose --dry-run
+
+# 2) 取最近一个 pending run_id
+RUN_ID=$(python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path("state/review_queue.jsonl")
+rows = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+pending = [r for r in rows if str(r.get("status","")).lower() == "pending"]
+print(pending[-1]["run_id"] if pending else "")
+PY
+)
+
+# 3) 查看 Day-0 建议买入清单（rebalance_actions）与建议书
+python3 - <<'PY'
+import glob, os
+run_id = os.environ.get("RUN_ID","").strip()
+matches = sorted(glob.glob(f"runs/*/{run_id}"))
+if not matches:
+    raise SystemExit("run dir not found")
+run_dir = matches[-1]
+print(f"run_dir={run_dir}")
+print(f"proposal={run_dir}/allocation_proposal.json")
+print(f"actions={run_dir}/rebalance_actions.csv")
+PY
+
+# 4) 人工审核通过后，系统会生成 execution_orders.csv（下单明细）
+python3 agent_review.py --decision approve --run-id "$RUN_ID" --reviewer your_name --note "day0 approve"
+
+# 5) 执行前先 dry-run，看执行成本与约束校验结果
+python3 agent_execute.py --run-id "$RUN_ID" --executor your_name --dry-run
+```
+
+说明：
+- Day-0 空仓场景下，若研究工具证据不足，系统会启用 bootstrap 兜底生成小规模建仓建议，仍需人工审核后才会进入执行队列。
+- “买什么”：看 `rebalance_actions.csv` 的 `action=BUY` 行。
+- “怎么买”：看 `execution_orders.csv` 的 `target_weight / delta_weight` 和执行报告。
+
+#### B) ntfy：如何给你手机发消息
+
+```bash
+# 0) 手机安装 ntfy，订阅一个 topic（例如 myinv-9f3k2a-alerts）
+
+# 1) 最小可用连通性测试（直接发一条）
+curl -X POST "https://ntfy.sh/myinv-9f3k2a-alerts" \
+  -H "Title: MyInvestment Test" \
+  -H "Priority: 5" \
+  -H "Tags: warning" \
+  -d "ntfy connectivity test from MyInvestment"
+
+# 2) 用项目 notifier 发“模拟告警”（不污染仓库 state）
+cat >/tmp/myinv_alerts_events.jsonl <<'EOF'
+{"timestamp":"2026-03-04T20:00:00+08:00","event":"opened","check_id":"demo_alert","level":"critical","value":1,"message":"demo critical alert","source":"manual_test"}
+EOF
+
+python3 agent_notifier.py \
+  --enabled \
+  --ntfy-enabled \
+  --events-path /tmp/myinv_alerts_events.jsonl \
+  --cursor-path /tmp/myinv_notify_cursor.json \
+  --dedupe-path /tmp/myinv_notify_dedupe.json \
+  --delivery-log /tmp/myinv_notify_delivery_log.jsonl \
+  --ntfy-topic myinv-9f3k2a-alerts
+```
+
+如需走 scheduler 自动推送：
+- 在 `agent_config.json` 中将 `notifications.enabled=true`
+- 配置 `notifications.ntfy.topic`
+- 执行 `python3 agent_scheduler.py --once`（默认会在 alerts 后调用 notifier）
+
 ## 8. 前端 i18n 说明
 
 - 字典位置：
@@ -355,6 +445,14 @@ E2E 用例：
 - 提案未进入可执行状态
 
 可先用 `--dry-run` 验证，再根据风险评估决定是否 `--force`。
+
+### Q5: 为什么执行接口提示 manual-only？
+
+当 `agent_config.json` 中 `execution.manual_only=true` 时：
+- `POST /api/executions/{run_id}` 仅允许 `dry_run=true`
+- `agent_execute.py` 非 dry-run 会直接拒绝
+
+这是为了把系统固定在“策略建议 + 人工下单”的安全模式，避免误触自动落状态。
 
 ## 12. 相关文档
 

@@ -194,3 +194,65 @@ def test_notifier_cooldown_deduplicates(tmp_path: Path) -> None:
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def test_notifier_reads_topic_from_env(tmp_path: Path, monkeypatch) -> None:
+    state_root = tmp_path / "state"
+    events_path = state_root / "alerts_events.jsonl"
+    cursor_path = state_root / "notify_cursor.json"
+    dedupe_path = state_root / "notify_dedupe.json"
+    delivery_log = state_root / "notify_delivery_log.jsonl"
+
+    _write_jsonl(
+        events_path,
+        [
+            {
+                "timestamp": "2026-02-25T14:00:00+08:00",
+                "event": "opened",
+                "check_id": "review_backlog",
+                "level": "warn",
+                "value": 3,
+                "message": "pending review backlog",
+                "source": "runs/ops/ops_report_latest.json",
+            }
+        ],
+    )
+
+    _CaptureHandler.records = []
+    server = HTTPServer(("127.0.0.1", 0), _CaptureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        monkeypatch.setenv("MYINVEST_NTFY_TOPIC", "env-topic")
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        cmd = [
+            sys.executable,
+            "agent_notifier.py",
+            "--enabled",
+            "--ntfy-enabled",
+            "--state-root",
+            str(state_root),
+            "--events-path",
+            str(events_path),
+            "--cursor-path",
+            str(cursor_path),
+            "--dedupe-path",
+            str(dedupe_path),
+            "--delivery-log",
+            str(delivery_log),
+            "--ntfy-base-url",
+            base_url,
+        ]
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert len(_CaptureHandler.records) == 1
+        assert _CaptureHandler.records[0]["path"] == "/env-topic"
+
+        logs = _read_jsonl(delivery_log)
+        assert any(x.get("status") == "sent" and x.get("topic") == "env-topic" for x in logs)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()

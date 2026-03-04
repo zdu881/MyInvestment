@@ -503,6 +503,44 @@ def test_mutation_endpoints_and_config_patch(tmp_path: Path) -> None:
     assert len(audit_path.read_text(encoding="utf-8").strip().splitlines()) >= 5
 
 
+def test_execution_blocked_when_manual_only_enabled(tmp_path: Path) -> None:
+    client, calls, settings = _build_client(tmp_path)
+
+    cfg = json.loads(settings.config_path.read_text(encoding="utf-8"))
+    execution_cfg = cfg.get("execution", {}) if isinstance(cfg.get("execution", {}), dict) else {}
+    execution_cfg["manual_only"] = True
+    cfg["execution"] = execution_cfg
+    settings.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    pending_execution = client.get("/api/executions/pending").json()["items"]
+    assert len(pending_execution) > 0
+    run_id = pending_execution[0]["run_id"]
+
+    blocked_resp = client.post(
+        f"/api/executions/{run_id}",
+        json={"executor": "tester", "dry_run": False, "force": False},
+    )
+    assert blocked_resp.status_code == 409
+    blocked_payload = blocked_resp.json()
+    assert blocked_payload["error_code"] == "manual_only"
+    assert len(calls) == 0
+
+    dry_run_resp = client.post(
+        f"/api/executions/{run_id}",
+        json={"executor": "tester", "dry_run": True, "force": False},
+    )
+    assert dry_run_resp.status_code == 200
+    assert "agent_execute.py" in " ".join(calls[-1])
+
+    audit_path = settings.state_root / "webui_audit_log.jsonl"
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(row.get("action") == "execute_run_blocked" for row in rows)
+
+
 def test_agent_interact_modes(tmp_path: Path) -> None:
     client, calls, settings = _build_client(tmp_path)
 

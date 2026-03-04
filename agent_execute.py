@@ -623,6 +623,10 @@ def main() -> int:
     cfg = load_runtime_config(Path(args.config))
     cfg_paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
     cfg_execution = cfg.get("execution", {}) if isinstance(cfg, dict) else {}
+    manual_only = safe_bool(cfg_execution.get("manual_only"), False)
+
+    if manual_only and not args.dry_run:
+        raise SystemExit("execution manual_only is enabled; only --dry-run is allowed")
 
     state_root = Path(cfg_paths.get("state_root", args.state_root))
     runs_root = Path(cfg_paths.get("runs_root", args.runs_root))

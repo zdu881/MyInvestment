@@ -37,7 +37,8 @@
     "stamp_duty_sell_rate": 0.001,
     "max_cost_ratio_total_asset": 0.005,
     "enforce_constraint_guard": true,
-    "constraint_tolerance": 0.001
+    "constraint_tolerance": 0.001,
+    "manual_only": true
   },
   "maintenance": {
     "review_stale_hours": 24.0,
@@ -77,7 +78,7 @@
     "max_alerts": 8
   },
   "notifications": {
-    "enabled": false,
+    "enabled": true,
     "send_events": "opened,escalated,resolved",
     "send_levels": "warn,critical",
     "cooldown_minutes": 30,
@@ -85,7 +86,7 @@
     "ntfy": {
       "enabled": true,
       "base_url": "https://ntfy.sh",
-      "topic": "",
+      "topic": "invest-zdu881",
       "timeout_sec": 8.0
     }
   }

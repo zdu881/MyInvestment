@@ -50,6 +50,9 @@ DEFAULT_CONFIG = {
         "max_candidates_for_research": 8,
         "max_new_positions": 3,
         "default_transaction_cost_rate": 0.0015,
+        "bootstrap_on_empty_positions": True,
+        "bootstrap_max_positions": 3,
+        "bootstrap_min_score": 0.0,
     },
     "gates": {
         "min_evidence_completeness": 0.6,
@@ -602,6 +605,7 @@ class AgentSystem:
     ) -> Tuple[Dict[str, float], Dict[str, Any]]:
         feedback = self._load_model_feedback()
         feedback_cfg = self.config.get("feedback", {})
+        postclose_cfg = self.config.get("postclose", {})
         min_confidence_buy = safe_float(
             feedback.get("min_confidence_buy"),
             safe_float(feedback_cfg.get("default_min_confidence_buy"), 0.6),
@@ -621,10 +625,13 @@ class AgentSystem:
 
         max_single = safe_float(account.get("max_single_weight"), 0.3)
         min_cash = safe_float(account.get("min_cash_ratio"), 0.1)
-        cfg_max_positions = int(self.config.get("postclose", {}).get("max_new_positions", 3))
+        cfg_max_positions = int(postclose_cfg.get("max_new_positions", 3))
         feedback_max_positions = safe_int(feedback.get("max_new_positions_override"), 0)
         max_positions = feedback_max_positions if feedback_max_positions > 0 else cfg_max_positions
         investable = max(0.0, 1.0 - min_cash)
+        bootstrap_on_empty_positions = bool(postclose_cfg.get("bootstrap_on_empty_positions", True))
+        bootstrap_max_positions = safe_int(postclose_cfg.get("bootstrap_max_positions"), 0)
+        bootstrap_min_score = safe_float(postclose_cfg.get("bootstrap_min_score"), 0.0)
 
         scored: List[Tuple[str, float]] = []
         df = candidate_df.copy()
@@ -670,6 +677,7 @@ class AgentSystem:
             "buy_candidates_considered": len(scored),
             "buy_candidates_filtered_by_confidence": low_confidence_filtered,
             "selected_count": len(selected),
+            "bootstrap_mode": False,
         }
 
         target: Dict[str, float] = {}
@@ -678,6 +686,27 @@ class AgentSystem:
             for ticker in selected:
                 target[ticker] = round(equal_w, 4)
             return target, feedback_context
+
+        # Day-0 fallback: when account is empty and no candidate reaches "buy" verdict,
+        # bootstrap a small starter portfolio from top-scoring fundamentals.
+        if positions.empty and bootstrap_on_empty_positions and score_map:
+            ranking = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
+            limit = bootstrap_max_positions if bootstrap_max_positions > 0 else max_positions
+            limit = max(1, limit)
+            bootstrap_selected = [t for t, score in ranking if score >= bootstrap_min_score][:limit]
+            if bootstrap_selected:
+                equal_w = min(max_single, investable / len(bootstrap_selected))
+                for ticker in bootstrap_selected:
+                    target[ticker] = round(equal_w, 4)
+                feedback_context.update(
+                    {
+                        "bootstrap_mode": True,
+                        "bootstrap_reason": "empty_positions_and_no_buy_verdict",
+                        "bootstrap_selected_count": len(bootstrap_selected),
+                        "bootstrap_min_score": round(bootstrap_min_score, 4),
+                    }
+                )
+                return target, feedback_context
 
         # Fallback: keep existing top holdings if no buy candidates.
         if positions.empty:
@@ -1032,12 +1061,16 @@ class AgentSystem:
         gate_cfg = self.config.get("gates", {})
         min_evidence = safe_float(gate_cfg.get("min_evidence_completeness"), 0.6)
         max_violations = int(gate_cfg.get("max_allowed_constraint_violations", 0))
+        bootstrap_mode = bool(feedback_context.get("bootstrap_mode", False))
 
         gate_failures: List[str] = []
+        gate_warnings: List[str] = []
         if hard_risk_block and positive_delta > 0:
             gate_failures.append("hard_risk_block_new_buy")
-        if evidence_completeness < min_evidence:
+        if evidence_completeness < min_evidence and not bootstrap_mode:
             gate_failures.append("evidence_below_threshold")
+        elif evidence_completeness < min_evidence and bootstrap_mode:
+            gate_warnings.append("evidence_below_threshold_bootstrap_override")
         if len(violations) > max_violations:
             gate_failures.append("constraint_violations")
 
@@ -1085,6 +1118,7 @@ class AgentSystem:
             "evidence_completeness": round(float(evidence_completeness), 4),
             "constraint_violations": violations,
             "gate_failures": gate_failures,
+            "gate_warnings": gate_warnings,
             "feedback_context": feedback_context,
             "decision": decision,
             "review_status": "pending_manual_review",
@@ -1117,6 +1151,8 @@ class AgentSystem:
             "constraint_violations": violations,
             "actionable_count": actionable_count,
             "gate_failures": gate_failures,
+            "gate_warnings": gate_warnings,
+            "bootstrap_mode": bootstrap_mode,
             "decision": decision,
         }
 

@@ -841,6 +841,28 @@ def create_app(
         body: ExecutionSubmitRequest,
         user: str = Depends(require_auth),
     ) -> dict[str, Any]:
+        runtime_cfg = repo.read_json(repo.config_path, default={})
+        execution_cfg = (
+            runtime_cfg.get("execution", {})
+            if isinstance(runtime_cfg.get("execution", {}), dict)
+            else {}
+        )
+        manual_only = _to_bool(execution_cfg.get("manual_only"), False)
+        if manual_only and not body.dry_run:
+            payload = body.model_dump() | {"run_id": run_id, "blocked_reason": "manual_only"}
+            _audit(
+                repo=repo,
+                action="execute_run_blocked",
+                payload=payload,
+                user=user,
+                command_result=None,
+            )
+            raise _error(
+                "manual_only",
+                "execution is manual-only; set dry_run=true and place broker orders manually",
+                status=409,
+            )
+
         if not repo.has_pending_execution(run_id):
             raise _error("conflict", f"run {run_id} is not pending execution", status=409)
         command = [
