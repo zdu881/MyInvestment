@@ -16,3 +16,5 @@ knowledge/skill_candidates.jsonl
 knowledge/skills_registry_history.jsonl
 knowledge/skill_promotion_last_run.json
 runs/scheduler.lock
+.env.local
+.env.*.local

@@ -24,6 +24,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from runtime_paths import resolve_runtime_paths
+
+try:
+    from llm_client import LLMClientError, LLMRuntimeConfig, enhance_stock_research_summary
+except Exception:
+    LLMClientError = RuntimeError
+    LLMRuntimeConfig = None
+    enhance_stock_research_summary = None
+
 # Optional tool imports. The runtime still works in degraded mode if unavailable.
 try:
     from mcp_tools import (
@@ -43,6 +52,7 @@ DEFAULT_CONFIG = {
         "runs_root": "runs",
         "state_root": "state",
         "knowledge_root": "knowledge",
+        "decision_log": "state/decision_log.jsonl",
         "step1_csv": "candidates.csv",
         "step2_csv": "candidates_step2.csv",
     },
@@ -70,6 +80,16 @@ DEFAULT_CONFIG = {
     },
     "feedback": {
         "default_min_confidence_buy": 0.6,
+    },
+    "llm": {
+        "enabled": True,
+        "provider": "siliconflow",
+        "base_url": "https://api.siliconflow.cn/v1/chat/completions",
+        "model": "Pro/zai-org/GLM-5",
+        "timeout_sec": 45.0,
+        "temperature": 0.2,
+        "max_tokens": 320,
+        "api_key_env": "SILICONFLOW_API_KEY",
     },
 }
 
@@ -157,9 +177,21 @@ def score_candidate(row: pd.Series) -> float:
 
 class AgentSystem:
     def __init__(self, config_path: str) -> None:
-        cfg = load_json(Path(config_path), default={})
+        cfg, runtime_paths = resolve_runtime_paths(Path(config_path))
         self.config = merge_dict(DEFAULT_CONFIG, cfg)
-        self.paths = self.config["paths"]
+        self.paths = dict(self.config["paths"])
+        self.paths["runs_root"] = str(runtime_paths.runs_root)
+        self.paths["state_root"] = str(runtime_paths.state_root)
+        self.paths["knowledge_root"] = str(runtime_paths.knowledge_root)
+        self.paths["decision_log"] = str(runtime_paths.decision_log_path)
+        self.paths["step1_csv"] = str(runtime_paths.step1_csv_path)
+        self.paths["step2_csv"] = str(runtime_paths.step2_csv_path)
+        self.config["paths"] = self.paths
+        self.llm_config = (
+            LLMRuntimeConfig.from_runtime_config(self.config.get("llm", {}), base_dir=runtime_paths.root_dir)
+            if LLMRuntimeConfig is not None
+            else None
+        )
 
     def make_context(self) -> RunContext:
         tz_hours = int(self.config.get("timezone_offset_hours", 8))
@@ -401,13 +433,11 @@ class AgentSystem:
                     "ok": True,
                     "message": "mocked",
                     "data": {
-                        "negative_events": [
-                            {
-                                "type": "placeholder",
-                                "severity": "medium",
-                                "headline": "dry-run placeholder",
-                            }
-                        ]
+                        "risk_score": 0.0,
+                        "source_count": 0,
+                        "categories": [],
+                        "negative_events": [],
+                        "conclusion": "dry-run mock: 未执行真实舆情检索",
                     },
                 },
                 "ah": {"ok": False, "message": "dry_run_or_tool_unavailable", "data": {}},
@@ -418,7 +448,7 @@ class AgentSystem:
         ah = calculate_ah_premium(ticker)
         return {"health": health, "sentiment": sentiment, "ah": ah}
 
-    def _derive_research_summary(self, ticker: str, tools: Dict[str, Any]) -> Dict[str, Any]:
+    def _derive_research_summary_base(self, ticker: str, tools: Dict[str, Any]) -> Dict[str, Any]:
         health = tools["health"]
         sentiment = tools["sentiment"]
         ah = tools["ah"]
@@ -444,11 +474,21 @@ class AgentSystem:
             risk_flags.append("财务健康检查失败或缺失")
 
         if s_ok:
-            events = sentiment.get("data", {}).get("negative_events", [])
-            if events and events[0].get("type") == "placeholder":
-                risk_flags.append("舆情工具仍为占位数据")
-            elif len(events) >= 3:
-                risk_flags.append("近3个月负面事件偏多")
+            s_data = sentiment.get("data", {})
+            events = s_data.get("negative_events", [])
+            categories = s_data.get("categories", [])
+            risk_score = s_data.get("risk_score")
+            if isinstance(risk_score, (int, float)) and risk_score >= 70:
+                risk_flags.append(f"近3个月舆情风险偏高（{risk_score:.1f}/100）")
+            elif isinstance(risk_score, (int, float)) and risk_score >= 40:
+                risk_flags.append(f"近3个月舆情风险中等（{risk_score:.1f}/100）")
+            elif not events:
+                thesis.append("近3个月未检索到明确负面舆情")
+
+            if "regulatory" in categories:
+                risk_flags.append("存在监管类负面舆情，需人工复核公告")
+            if "earnings_stress" in categories:
+                risk_flags.append("存在业绩承压信号，需核对预告与快报")
         else:
             risk_flags.append("舆情检查失败或缺失")
 
@@ -466,10 +506,10 @@ class AgentSystem:
 
         tool_success = int(h_ok) + int(s_ok) + int(ah_ok)
         confidence = round(tool_success / 3.0, 2)
-        if "舆情工具仍为占位数据" in risk_flags:
-            confidence = round(max(0.0, confidence - 0.2), 2)
+        sentiment_risk_score = sentiment.get("data", {}).get("risk_score")
+        if isinstance(sentiment_risk_score, (int, float)) and sentiment_risk_score >= 70:
+            confidence = round(max(0.0, confidence - 0.1), 2)
 
-        # Conservative verdict policy.
         if confidence < 0.5:
             verdict = "observe"
         elif len(risk_flags) >= 3:
@@ -486,7 +526,35 @@ class AgentSystem:
             "confidence": confidence,
             "verdict": verdict,
             "tool_evidence": tools,
+            "analysis_mode": "heuristic",
         }
+
+    def _derive_research_summary(
+        self,
+        ticker: str,
+        tools: Dict[str, Any],
+        *,
+        name: str = "N/A",
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        summary = self._derive_research_summary_base(ticker, tools)
+        if dry_run or self.llm_config is None or enhance_stock_research_summary is None:
+            return summary
+
+        try:
+            return enhance_stock_research_summary(
+                ticker=ticker,
+                name=name,
+                tools=tools,
+                base_summary=summary,
+                runtime_config=self.llm_config,
+            )
+        except LLMClientError as exc:
+            summary["llm"] = {"error": str(exc)}
+            return summary
+        except Exception as exc:
+            summary["llm"] = {"error": f"unexpected_llm_error: {exc}"}
+            return summary
 
     def _extract_skill_candidates(
         self, ctx: RunContext, research_rows: List[Dict[str, Any]]
@@ -1005,7 +1073,12 @@ class AgentSystem:
         for _, row in top_df.iterrows():
             ticker = normalize_ticker(row["ticker_norm"])
             tools = self._run_tools(ticker, dry_run=dry_run)
-            summary = self._derive_research_summary(ticker, tools)
+            summary = self._derive_research_summary(
+                ticker,
+                tools,
+                name=str(row.get("名称", "N/A")),
+                dry_run=dry_run,
+            )
             summary["run_id"] = ctx.run_id
             summary["trading_date"] = ctx.trading_date
             summary["as_of_ts"] = ctx.as_of_ts
@@ -1171,7 +1244,7 @@ class AgentSystem:
         artifacts.append(str(decision_log_path))
 
         # Global rolling decision log for cross-run lookup.
-        append_jsonl(Path("decision_log.jsonl"), decision_row)
+        append_jsonl(Path(self.paths["decision_log"]), decision_row)
 
         advice_path = self._generate_advice_report(
             ctx=ctx,

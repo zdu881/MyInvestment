@@ -10,7 +10,7 @@ This document describes the first build milestone of the daily investment agent 
 - `state/account_snapshot.json`: account snapshot and risk constraints.
 - `state/watchlist.csv`: watchlist input.
 - `runs/{trading_date}/{run_id}/...`: per-run artifacts.
-- `decision_log.jsonl`: rolling decision log across runs.
+- `state/decision_log.jsonl`: rolling decision log across runs.
 
 ## Run commands
 
@@ -81,7 +81,7 @@ This document describes the first build milestone of the daily investment agent 
 - `stock_research.jsonl`: per-ticker AI/tool research summary.
 - `allocation_proposal.json`: target portfolio and gate results.
 - `rebalance_actions.csv`: action table (`BUY/SELL/INCREASE/DECREASE/HOLD`).
-- `decision_log.jsonl`: run-level decision log.
+- `decision_log.jsonl`: run-level decision log inside each `runs/{trading_date}/{run_id}/` directory.
 - `review_request.json`: pending manual review payload.
 - `skill_candidates.jsonl`: run-level skill discovery candidates.
 - `execution_orders.csv`: queued execution orders generated after approved rebalance.
@@ -126,6 +126,14 @@ This document describes the first build milestone of the daily investment agent 
 
 - `agent_action_center.py` consolidates health, alerts, pending review queue, and pending execution queue into a single decision dashboard.
 - It is refreshed by scheduler by default and can be consumed as `runs/ops/action_center_latest.md`.
+
+## LLM integration
+
+- The agent supports SiliconFlow-compatible chat completion for postclose research refinement.
+- Default model is `Pro/zai-org/GLM-5`; configure in `agent_config.json` under `llm` (default `max_tokens=320`).
+- Put the API key in `.env.local` or export it before non-dry runs: `export SILICONFLOW_API_KEY=...`
+- If the key is missing or the provider fails, the runtime falls back to deterministic heuristic summaries and records the error in `stock_research.jsonl`.
+- `.env.local` is loaded automatically when `llm.env_file` points to it.
 
 ## Notes
 

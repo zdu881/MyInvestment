@@ -4,6 +4,7 @@
     "runs_root": "runs",
     "state_root": "state",
     "knowledge_root": "knowledge",
+    "decision_log": "state/decision_log.jsonl",
     "step1_csv": "candidates.csv",
     "step2_csv": "candidates_step2.csv"
   },
@@ -89,5 +90,16 @@
       "topic": "invest-zdu881",
       "timeout_sec": 8.0
     }
+  },
+  "llm": {
+    "enabled": true,
+    "provider": "siliconflow",
+    "base_url": "https://api.siliconflow.cn/v1/chat/completions",
+    "model": "Pro/zai-org/GLM-5",
+    "timeout_sec": 45.0,
+    "temperature": 0.2,
+    "max_tokens": 320,
+    "api_key_env": "SILICONFLOW_API_KEY",
+    "env_file": ".env.local"
   }
 }
