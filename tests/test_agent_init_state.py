@@ -29,6 +29,7 @@ def _build_workspace(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                 "runs_root": "runs",
                 "state_root": "state",
                 "knowledge_root": "knowledge",
+                "decision_log": "state/decision_log.jsonl",
             },
             "constraints": {
                 "max_single_weight": 0.3,
@@ -65,7 +66,7 @@ def test_init_state_reset_runtime_and_knowledge(tmp_path: Path) -> None:
         '{"dry_run":false,"run_id":"x"}\n',
         encoding="utf-8",
     )
-    (tmp_path / "decision_log.jsonl").write_text('{"run_id":"x"}\n', encoding="utf-8")
+    (state_root / "decision_log.jsonl").write_text('{"run_id":"x"}\n', encoding="utf-8")
 
     (knowledge_root / "skill_candidates.jsonl").parent.mkdir(parents=True, exist_ok=True)
     (knowledge_root / "skill_candidates.jsonl").write_text('{"id":"x"}\n', encoding="utf-8")
@@ -118,7 +119,7 @@ def test_init_state_reset_runtime_and_knowledge(tmp_path: Path) -> None:
     assert (state_root / "review_queue.jsonl").read_text(encoding="utf-8") == ""
     assert (state_root / "execution_queue.jsonl").read_text(encoding="utf-8") == ""
     assert not (state_root / "execution_history.jsonl").exists()
-    assert (tmp_path / "decision_log.jsonl").read_text(encoding="utf-8") == ""
+    assert (state_root / "decision_log.jsonl").read_text(encoding="utf-8") == ""
 
     assert (knowledge_root / "skill_candidates.jsonl").read_text(encoding="utf-8") == ""
     assert (knowledge_root / "skills_registry_history.jsonl").read_text(encoding="utf-8") == ""

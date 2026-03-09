@@ -17,6 +17,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from runtime_paths import RuntimePaths, resolve_runtime_paths
+from state_io import LockTimeoutError, advisory_lock, write_jsonl_atomic
+
 DEFAULT_EXECUTION_SETTINGS = {
     "slippage_bps": 5.0,
     "commission_rate": 0.0003,
@@ -603,33 +606,39 @@ def estimate_execution_costs(
     }
 
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Execute approved rebalance task")
     parser.add_argument("--queue-id", default="")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--executor", default="manual_executor")
     parser.add_argument("--config", default="agent_config.json")
-    parser.add_argument("--state-root", default="state")
-    parser.add_argument("--runs-root", default="runs")
+    parser.add_argument("--state-root", default="")
+    parser.add_argument("--runs-root", default="")
     parser.add_argument("--timezone-offset-hours", type=int, default=8)
     parser.add_argument("--force", action="store_true", help="override execution cost guard")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--lock-timeout-sec", type=float, default=10.0)
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def _resolve_orders_path(queue_item: Dict[str, Any], run_dir: Path, runtime_paths: RuntimePaths) -> Path:
+    raw_value = str(queue_item.get("execution_orders_path", run_dir / "execution_orders.csv"))
+    path = Path(raw_value)
+    if not path.is_absolute():
+        path = (runtime_paths.root_dir / path).resolve()
+    return path
 
-    cfg = load_runtime_config(Path(args.config))
-    cfg_paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
-    cfg_execution = cfg.get("execution", {}) if isinstance(cfg, dict) else {}
-    manual_only = safe_bool(cfg_execution.get("manual_only"), False)
 
-    if manual_only and not args.dry_run:
-        raise SystemExit("execution manual_only is enabled; only --dry-run is allowed")
-
-    state_root = Path(cfg_paths.get("state_root", args.state_root))
-    runs_root = Path(cfg_paths.get("runs_root", args.runs_root))
+def _run_locked_execution(
+    args: argparse.Namespace,
+    cfg: Dict[str, Any],
+    cfg_execution: Dict[str, Any],
+    runtime_paths: RuntimePaths,
+) -> int:
+    state_root = runtime_paths.state_root
+    runs_root = runtime_paths.runs_root
+    decision_log_path = runtime_paths.decision_log_path
     queue_path = state_root / "execution_queue.jsonl"
 
     queue_rows = read_jsonl(queue_path)
@@ -648,7 +657,7 @@ def main() -> int:
 
     proposal_path = run_dir / "allocation_proposal.json"
     review_path = run_dir / "review_decision.json"
-    orders_path = Path(str(queue_item.get("execution_orders_path", run_dir / "execution_orders.csv")))
+    orders_path = _resolve_orders_path(queue_item, run_dir, runtime_paths)
 
     proposal = load_json(proposal_path)
     review = load_json(review_path)
@@ -779,16 +788,15 @@ def main() -> int:
         if projected_total_asset_after_cost > 0:
             after_positions_for_validation["weight"] = (
                 after_positions_for_validation["market_value"] / projected_total_asset_after_cost
-            )
+            ).round(6)
         else:
             after_positions_for_validation["weight"] = 0.0
-    constraints = load_constraints(account, cfg)
-    constraint_tolerance = safe_float(cfg_execution.get("constraint_tolerance"), 0.001)
+
     constraint_validation = validate_post_execution_constraints(
         positions_df=after_positions_for_validation,
         cash_ratio=projected_cash_ratio_after_cost,
-        constraints=constraints,
-        tolerance=constraint_tolerance,
+        constraints=load_constraints(account, cfg),
+        tolerance=safe_float(cfg_execution.get("constraint_tolerance"), 0.001),
     )
     if (
         enforce_constraint_guard
@@ -848,11 +856,9 @@ def main() -> int:
         "constraint_validation": constraint_validation,
         "max_cost_ratio_guard": round(max_cost_ratio_guard, 8),
         "enforce_constraint_guard": enforce_constraint_guard,
-        "constraint_tolerance": round(constraint_tolerance, 8),
+        "constraint_tolerance": round(safe_float(cfg_execution.get("constraint_tolerance"), 0.001), 8),
         "force_override": bool(args.force),
-        "estimated_total_execution_cost": round(
-            total_execution_cost, 4
-        ),
+        "estimated_total_execution_cost": round(total_execution_cost, 4),
         "projected_cash_after_cost": round(projected_cash_after_cost, 4),
         "projected_total_asset_after_cost": round(projected_total_asset_after_cost, 4),
         "projected_cash_ratio_after_cost": round(projected_cash_ratio_after_cost, 6),
@@ -863,32 +869,30 @@ def main() -> int:
         cash_after_cost = projected_cash_after_cost
         total_asset_after_cost = projected_total_asset_after_cost
 
-        # Recompute weights using post-cost total asset.
         for row in new_rows:
             if total_asset_after_cost > 0:
                 row["weight"] = round(safe_float(row["market_value"], 0.0) / total_asset_after_cost, 6)
             else:
                 row["weight"] = 0.0
 
-        # 1) update positions
         pd.DataFrame(new_rows).to_csv(positions_path, index=False, encoding="utf-8-sig")
 
-        # 2) update account snapshot
         account["stock_asset"] = round(stock_asset, 4)
         account["cash"] = round(cash_after_cost, 4)
         account["total_asset"] = round(total_asset_after_cost, 4)
-        account["cash_ratio"] = round((cash_after_cost / total_asset_after_cost) if total_asset_after_cost > 0 else 1.0, 6)
+        account["cash_ratio"] = round(
+            (cash_after_cost / total_asset_after_cost) if total_asset_after_cost > 0 else 1.0,
+            6,
+        )
         account["last_execution_cost"] = round(total_execution_cost, 4)
         account["updated_at"] = executed_at
         write_json(account_path, account)
 
-        # 3) update queue status
         queue_rows[queue_idx]["status"] = "executed"
         queue_rows[queue_idx]["executed_at"] = executed_at
         queue_rows[queue_idx]["executor"] = args.executor
-        write_jsonl(queue_path, queue_rows)
+        write_jsonl_atomic(queue_path, queue_rows)
 
-        # 4) update proposal status
         proposal["execution_status"] = "executed"
         proposal["executed_at"] = executed_at
         proposal["executed_by"] = args.executor
@@ -897,28 +901,33 @@ def main() -> int:
         proposal["constraint_validation"] = constraint_validation
         write_json(proposal_path, proposal)
 
-        # 5) audit artifacts
         execution_result["cash_after_cost"] = round(cash_after_cost, 4)
         execution_result["total_asset_after_cost"] = round(total_asset_after_cost, 4)
         result_path = run_dir / "execution_result.json"
         write_json(result_path, execution_result)
         append_jsonl(state_root / "execution_history.jsonl", execution_result)
-        append_jsonl(Path("decision_log.jsonl"), {
-            "timestamp": executed_at,
-            "run_id": run_id,
-            "decision_id": proposal_id,
-            "executor": args.executor,
-            "final_action": "executed_rebalance",
-            "note": "execution applied to state",
-        })
-        append_jsonl(run_dir / "decision_log.jsonl", {
-            "timestamp": executed_at,
-            "run_id": run_id,
-            "decision_id": proposal_id,
-            "executor": args.executor,
-            "final_action": "executed_rebalance",
-            "note": "execution applied to state",
-        })
+        append_jsonl(
+            decision_log_path,
+            {
+                "timestamp": executed_at,
+                "run_id": run_id,
+                "decision_id": proposal_id,
+                "executor": args.executor,
+                "final_action": "executed_rebalance",
+                "note": "execution applied to state",
+            },
+        )
+        append_jsonl(
+            run_dir / "decision_log.jsonl",
+            {
+                "timestamp": executed_at,
+                "run_id": run_id,
+                "decision_id": proposal_id,
+                "executor": args.executor,
+                "final_action": "executed_rebalance",
+                "note": "execution applied to state",
+            },
+        )
     else:
         execution_result["note"] = "dry-run only, state not changed"
         result_path = run_dir / "execution_result.json"
@@ -935,6 +944,28 @@ def main() -> int:
         print(f"[WARN] warnings={len(warnings)}")
 
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    cfg, runtime_paths = resolve_runtime_paths(
+        Path(args.config),
+        overrides={
+            "state_root": args.state_root,
+            "runs_root": args.runs_root,
+        },
+    )
+    cfg_execution = cfg.get("execution", {}) if isinstance(cfg, dict) else {}
+    manual_only = safe_bool(cfg_execution.get("manual_only"), False)
+
+    if manual_only and not args.dry_run:
+        raise SystemExit("execution manual_only is enabled; only --dry-run is allowed")
+
+    try:
+        with advisory_lock(runtime_paths.state_root / "queues.lock", timeout_sec=args.lock_timeout_sec):
+            return _run_locked_execution(args, cfg, cfg_execution, runtime_paths)
+    except LockTimeoutError as exc:
+        raise SystemExit(f"execution queue is busy: {exc}") from exc
 
 
 if __name__ == "__main__":

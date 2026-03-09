@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +37,7 @@ class SchedulerOnceRequest(BaseModel):
     skip_feedback: bool = False
     skip_skill_promotion: bool = False
     skip_alerts: bool = False
+    skip_notifier: bool = False
     skip_action_center: bool = False
     ops_on_idle: bool = False
     ops_days: int = Field(default=7, ge=1)
@@ -66,6 +68,68 @@ class AgentInteractRequest(BaseModel):
 
 
 CommandRunner = Callable[[list[str], Path, int], CommandResult]
+
+
+ROLE_PERMISSIONS: dict[str, set[str]] = {
+    "viewer": {"read", "agent_read"},
+    "reviewer": {"read", "agent_read", "review"},
+    "executor": {"read", "agent_read", "execute"},
+    "admin": {
+        "read",
+        "agent_read",
+        "review",
+        "execute",
+        "schedule",
+        "config",
+        "onboarding",
+        "operation",
+    },
+}
+ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "executor": 2, "admin": 3}
+CONFIG_AWARE_SCRIPTS = {
+    "agent_review.py",
+    "agent_execute.py",
+    "agent_scheduler.py",
+    "agent_init_state.py",
+}
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    role: str
+    permissions: frozenset[str]
+
+
+def _merge_auth_tokens(cfg: AppSettings) -> dict[str, str]:
+    tokens = {role: token for role, token in (cfg.auth_tokens or {}).items() if str(token).strip()}
+    legacy = str(cfg.api_token or "").strip()
+    if legacy and "admin" not in tokens:
+        tokens["admin"] = legacy
+    return tokens
+
+
+def _build_token_contexts(cfg: AppSettings) -> dict[str, AuthContext]:
+    contexts: dict[str, AuthContext] = {}
+    grouped: dict[str, set[str]] = {}
+    for role, token in _merge_auth_tokens(cfg).items():
+        grouped.setdefault(token, set()).add(role)
+
+    for token, roles in grouped.items():
+        permissions: set[str] = set()
+        for role in roles:
+            permissions.update(ROLE_PERMISSIONS.get(role, set()))
+        primary_role = max(roles, key=lambda item: ROLE_PRIORITY.get(item, -1))
+        contexts[token] = AuthContext(role=primary_role, permissions=frozenset(permissions))
+    return contexts
+
+
+def _inject_config_path(command: list[str], config_path: Path) -> list[str]:
+    if len(command) < 2 or "--config" in command:
+        return list(command)
+    script_name = Path(command[1]).name
+    if script_name not in CONFIG_AWARE_SCRIPTS:
+        return list(command)
+    return [command[0], command[1], "--config", str(config_path), *command[2:]]
 
 
 def _error(code: str, message: str, status: int = 400, details: Any | None = None) -> HTTPException:
@@ -643,6 +707,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="MyInvestment Web API", version="0.1.0")
     cfg = settings or AppSettings.from_env()
+    token_contexts = _build_token_contexts(cfg)
     repo = FileRepo(
         root_dir=cfg.root_dir,
         runs_root=cfg.runs_root,
@@ -660,13 +725,35 @@ def create_app(
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    def require_auth(x_api_token: str | None = Header(default=None)) -> str:
-        configured = str(cfg.api_token or "").strip()
-        if not configured:
-            return "anonymous"
-        if x_api_token != configured:
+    def _authenticate(x_api_token: str | None = Header(default=None)) -> AuthContext:
+        if not cfg.auth_required:
+            return AuthContext(role="admin", permissions=frozenset(ROLE_PERMISSIONS["admin"]))
+        if not token_contexts:
+            raise _error(
+                "auth_not_configured",
+                "API authentication is enabled but no tokens are configured",
+                status=503,
+            )
+        token = str(x_api_token or "").strip()
+        ctx = token_contexts.get(token)
+        if ctx is None:
             raise _error("unauthorized", "invalid or missing API token", status=401)
-        return "token_user"
+        return ctx
+
+    def require_permission(permission: str) -> Callable[[AuthContext], str]:
+        def dependency(ctx: AuthContext = Depends(_authenticate)) -> str:
+            if permission not in ctx.permissions:
+                raise _error("forbidden", f"permission denied for {permission}", status=403)
+            return ctx.role
+
+        return dependency
+
+    require_reader = require_permission("read")
+    require_reviewer = require_permission("review")
+    require_executor = require_permission("execute")
+    require_scheduler = require_permission("schedule")
+    require_config_admin = require_permission("config")
+    require_onboarding_admin = require_permission("onboarding")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -683,7 +770,7 @@ def create_app(
         return FileResponse(index)
 
     @app.get("/api/action-center")
-    def get_action_center() -> dict[str, Any]:
+    def get_action_center(user: str = Depends(require_reader)) -> dict[str, Any]:
         path = repo.runs_root / "ops" / "action_center_latest.json"
         data = repo.read_json(path, default={})
         if not data:
@@ -691,7 +778,7 @@ def create_app(
         return data
 
     @app.get("/api/ops/report")
-    def get_ops_report() -> dict[str, Any]:
+    def get_ops_report(user: str = Depends(require_reader)) -> dict[str, Any]:
         path = repo.runs_root / "ops" / "ops_report_latest.json"
         data = repo.read_json(path, default={})
         if not data:
@@ -699,7 +786,7 @@ def create_app(
         return data
 
     @app.get("/api/alerts")
-    def get_alerts() -> dict[str, Any]:
+    def get_alerts(user: str = Depends(require_reader)) -> dict[str, Any]:
         path = repo.runs_root / "ops" / "alerts_latest.json"
         data = repo.read_json(path, default={})
         if not data:
@@ -707,13 +794,16 @@ def create_app(
         return data
 
     @app.get("/api/alerts/events")
-    def get_alert_events(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+    def get_alert_events(
+        limit: int = Query(default=100, ge=1, le=500),
+        user: str = Depends(require_reader),
+    ) -> dict[str, Any]:
         rows = repo.read_jsonl(repo.state_root / "alerts_events.jsonl")
         rows = sorted(rows, key=lambda x: str(x.get("timestamp", "")), reverse=True)
         return {"items": rows[:limit]}
 
     @app.get("/api/quality/latest")
-    def get_quality_latest() -> dict[str, Any]:
+    def get_quality_latest(user: str = Depends(require_reader)) -> dict[str, Any]:
         path = repo.runs_root / "ops" / "proposal_quality_latest.json"
         data = repo.read_json(path, default={})
         if not data:
@@ -721,11 +811,14 @@ def create_app(
         return data
 
     @app.get("/api/agent/operations")
-    def list_agent_operations() -> dict[str, Any]:
+    def list_agent_operations(user: str = Depends(require_reader)) -> dict[str, Any]:
         return {"items": _agent_operation_public_specs()}
 
     @app.get("/api/agent/operations/history")
-    def list_agent_operation_history(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+    def list_agent_operation_history(
+        limit: int = Query(default=100, ge=1, le=500),
+        user: str = Depends(require_reader),
+    ) -> dict[str, Any]:
         rows = repo.read_jsonl(_operation_history_path(repo))
         rows = sorted(rows, key=lambda x: str(x.get("timestamp", "")), reverse=True)
         return {"items": rows[:limit]}
@@ -736,6 +829,7 @@ def create_app(
         phase: str | None = Query(default=None, pattern="^(preopen|intraday|postclose|all)$"),
         status: str | None = Query(default=None, pattern="^(success|failed)$"),
         limit: int = Query(default=50, ge=1, le=200),
+        user: str = Depends(require_reader),
     ) -> dict[str, Any]:
         rows = repo.list_run_manifests()
         if trading_date:
@@ -748,7 +842,7 @@ def create_app(
         return {"items": rows}
 
     @app.get("/api/runs/{run_id}")
-    def get_run(run_id: str) -> dict[str, Any]:
+    def get_run(run_id: str, user: str = Depends(require_reader)) -> dict[str, Any]:
         run_dir = repo.find_run_dir(run_id)
         if run_dir is None:
             raise _error("not_found", f"run not found: {run_id}", status=404)
@@ -758,7 +852,7 @@ def create_app(
         return manifest
 
     @app.get("/api/runs/{run_id}/artifacts")
-    def list_run_artifacts(run_id: str) -> dict[str, Any]:
+    def list_run_artifacts(run_id: str, user: str = Depends(require_reader)) -> dict[str, Any]:
         run_dir = repo.find_run_dir(run_id)
         if run_dir is None:
             raise _error("not_found", f"run not found: {run_id}", status=404)
@@ -768,7 +862,11 @@ def create_app(
         return {"items": repo.list_run_artifacts(run_dir, manifest)}
 
     @app.get("/api/runs/{run_id}/artifact-content")
-    def get_artifact_content(run_id: str, artifact: str = Query(...)) -> dict[str, Any]:
+    def get_artifact_content(
+        run_id: str,
+        artifact: str = Query(...),
+        user: str = Depends(require_reader),
+    ) -> dict[str, Any]:
         run_dir = repo.find_run_dir(run_id)
         if run_dir is None:
             raise _error("not_found", f"run not found: {run_id}", status=404)
@@ -781,11 +879,11 @@ def create_app(
         return {"artifact": artifact, "kind": kind, "content": content}
 
     @app.get("/api/proposals/pending")
-    def list_pending_proposals() -> dict[str, Any]:
+    def list_pending_proposals(user: str = Depends(require_reader)) -> dict[str, Any]:
         return {"items": repo.pending_review_items()}
 
     @app.get("/api/proposals/{run_id}")
-    def get_proposal_detail(run_id: str) -> dict[str, Any]:
+    def get_proposal_detail(run_id: str, user: str = Depends(require_reader)) -> dict[str, Any]:
         payload = repo.load_proposal_bundle(run_id)
         if payload is None:
             raise _error("not_found", f"proposal not found for run: {run_id}", status=404)
@@ -795,7 +893,7 @@ def create_app(
     def submit_review(
         run_id: str,
         body: ReviewSubmitRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(require_reviewer),
     ) -> dict[str, Any]:
         if not repo.has_pending_review(run_id):
             raise _error("conflict", f"run {run_id} is not pending review", status=409)
@@ -811,7 +909,7 @@ def create_app(
             "--note",
             body.note,
         ]
-        result = runner(command, cfg.root_dir, cfg.command_timeout_sec)
+        result = runner(_inject_config_path(command, cfg.config_path), cfg.root_dir, cfg.command_timeout_sec)
         _audit(
             repo=repo,
             action="submit_review",
@@ -832,14 +930,14 @@ def create_app(
         return output
 
     @app.get("/api/executions/pending")
-    def list_pending_executions() -> dict[str, Any]:
+    def list_pending_executions(user: str = Depends(require_reader)) -> dict[str, Any]:
         return {"items": repo.pending_execution_items()}
 
     @app.post("/api/executions/{run_id}")
     def execute_run(
         run_id: str,
         body: ExecutionSubmitRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(require_executor),
     ) -> dict[str, Any]:
         runtime_cfg = repo.read_json(repo.config_path, default={})
         execution_cfg = (
@@ -877,7 +975,7 @@ def create_app(
             command.append("--dry-run")
         if body.force:
             command.append("--force")
-        result = runner(command, cfg.root_dir, cfg.command_timeout_sec)
+        result = runner(_inject_config_path(command, cfg.config_path), cfg.root_dir, cfg.command_timeout_sec)
         _audit(
             repo=repo,
             action="execute_run",
@@ -900,7 +998,7 @@ def create_app(
     @app.post("/api/scheduler/once")
     def scheduler_once(
         body: SchedulerOnceRequest | None = None,
-        user: str = Depends(require_auth),
+        user: str = Depends(require_scheduler),
     ) -> dict[str, Any]:
         req = body or SchedulerOnceRequest()
         command = [sys.executable, "agent_scheduler.py", "--once"]
@@ -916,6 +1014,8 @@ def create_app(
             command.append("--skip-skill-promotion")
         if req.skip_alerts:
             command.append("--skip-alerts")
+        if req.skip_notifier:
+            command.append("--skip-notifier")
         if req.skip_action_center:
             command.append("--skip-action-center")
         if req.ops_on_idle:
@@ -923,7 +1023,7 @@ def create_app(
         command.extend(["--ops-days", str(req.ops_days)])
         command.extend(["--feedback-days", str(req.feedback_days)])
 
-        result = runner(command, cfg.root_dir, cfg.command_timeout_sec)
+        result = runner(_inject_config_path(command, cfg.config_path), cfg.root_dir, cfg.command_timeout_sec)
         _audit(
             repo=repo,
             action="scheduler_once",
@@ -945,7 +1045,7 @@ def create_app(
     @app.post("/api/onboarding/init")
     def onboarding_init(
         body: OnboardingInitRequest,
-        user: str = Depends(require_auth),
+        user: str = Depends(require_onboarding_admin),
     ) -> dict[str, Any]:
         command = [
             sys.executable,
@@ -975,7 +1075,7 @@ def create_app(
         if body.dry_run:
             command.append("--dry-run")
 
-        result = runner(command, cfg.root_dir, cfg.command_timeout_sec)
+        result = runner(_inject_config_path(command, cfg.config_path), cfg.root_dir, cfg.command_timeout_sec)
         _audit(
             repo=repo,
             action="onboarding_init",
@@ -997,9 +1097,10 @@ def create_app(
     @app.post("/api/agent/interact")
     def agent_interact(
         body: AgentInteractRequest,
-        user: str = Depends(require_auth),
+        auth: AuthContext = Depends(_authenticate),
     ) -> dict[str, Any]:
         mode = str(body.mode).strip().lower()
+        user = auth.role
         message = str(body.message or "").strip()
         snapshot = _agent_snapshot(repo)
         command_result: CommandResult | None = None
@@ -1008,14 +1109,20 @@ def create_app(
         ok = True
 
         if mode == "ask":
+            if "agent_read" not in auth.permissions:
+                raise _error("forbidden", "permission denied for agent_read", status=403)
             if not message:
                 raise _error("bad_request", "message is required in ask mode", status=400)
             reply = _build_ask_reply(message, snapshot)
         elif mode == "plan":
+            if "agent_read" not in auth.permissions:
+                raise _error("forbidden", "permission denied for agent_read", status=403)
             if not message:
                 raise _error("bad_request", "message is required in plan mode", status=400)
             reply = _build_plan_reply(message, snapshot)
         else:
+            if "operation" not in auth.permissions:
+                raise _error("forbidden", "permission denied for operation", status=403)
             selected_operation_id = str(body.operation_id or "").strip()
             selected_operation_options = body.operation_options if isinstance(body.operation_options, dict) else {}
 
@@ -1029,12 +1136,13 @@ def create_app(
                 ok = False
                 reply = _operation_help_text()
             else:
+                command_to_run = _inject_config_path(operation_spec["command"], cfg.config_path)
                 operation_payload = {
                     "id": operation_spec["id"],
                     "label": operation_spec["label"],
                     "i18n_key": operation_spec.get("i18n_key", ""),
                     "options": operation_spec.get("options", {}),
-                    "command": operation_spec["command"],
+                    "command": command_to_run,
                     "executed": False,
                 }
                 if body.confirm:
@@ -1077,7 +1185,7 @@ def create_app(
                                     "retry_after_sec": cooldown_remain_sec,
                                 }
                             else:
-                                command_result = runner(operation_spec["command"], cfg.root_dir, cfg.command_timeout_sec)
+                                command_result = runner(command_to_run, cfg.root_dir, cfg.command_timeout_sec)
                                 operation_payload["executed"] = True
                                 operation_payload["exit_code"] = command_result.exit_code
                                 operation_payload["stdout_tail"] = command_result.stdout_tail
@@ -1119,7 +1227,7 @@ def create_app(
                     reply = "\n".join(
                         [
                             f"已识别操作: {operation_spec['label']}",
-                            f"command: {' '.join(operation_spec['command'])}",
+                            f"command: {' '.join(command_to_run)}",
                             f"confirmation_id: {confirmation_payload['confirmation_id']}",
                             f"expires_at: {confirmation_payload['expires_at']}",
                             "当前为预览模式。勾选 confirm 后携带 confirmation_id 执行。",
@@ -1152,7 +1260,7 @@ def create_app(
         }
 
     @app.get("/api/config")
-    def get_config() -> dict[str, Any]:
+    def get_config(user: str = Depends(require_reader)) -> dict[str, Any]:
         data = repo.read_json(repo.config_path, default={})
         if not data:
             raise _error("not_found", "config not found", status=404)
@@ -1161,7 +1269,7 @@ def create_app(
     @app.patch("/api/config")
     def patch_config(
         patch: dict[str, Any],
-        user: str = Depends(require_auth),
+        user: str = Depends(require_config_admin),
     ) -> dict[str, Any]:
         if not isinstance(patch, dict):
             raise _error("bad_request", "patch body must be object", status=400)

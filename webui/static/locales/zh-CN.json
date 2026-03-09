@@ -5,7 +5,7 @@
   "header.language": "语言",
   "lang.zh": "中文",
   "lang.en": "English",
-  "token.placeholder": "可选 API Token",
+  "token.placeholder": "API Token",
   "token.save": "保存 Token",
   "token.saved": "token 已保存",
   "token.cleared": "token 已清空",

@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import shutil
+import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from state_io import advisory_lock
 from webapi.main import create_app
 from webapi.services.command_runner import CommandResult
 from webapi.settings import AppSettings
+
+
+TEST_TOKENS = {
+    "viewer": "viewer-token",
+    "reviewer": "reviewer-token",
+    "executor": "executor-token",
+    "admin": "admin-token",
+}
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -318,10 +329,24 @@ def _ensure_demo_runtime_data(settings: AppSettings) -> None:
 
 def _build_test_workspace(tmp_path: Path) -> AppSettings:
     repo_root = Path(__file__).resolve().parents[1]
-    shutil.copytree(repo_root / "runs", tmp_path / "runs")
-    shutil.copytree(repo_root / "state", tmp_path / "state")
-    shutil.copytree(repo_root / "knowledge", tmp_path / "knowledge")
-    shutil.copytree(repo_root / "webui", tmp_path / "webui")
+    runs_src = repo_root / "runs"
+    state_src = repo_root / "state"
+    knowledge_src = repo_root / "knowledge"
+    webui_src = repo_root / "webui"
+
+    if runs_src.exists():
+        shutil.copytree(runs_src, tmp_path / "runs")
+    else:
+        (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    if state_src.exists():
+        shutil.copytree(state_src, tmp_path / "state")
+    else:
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    if knowledge_src.exists():
+        shutil.copytree(knowledge_src, tmp_path / "knowledge")
+    else:
+        (tmp_path / "knowledge").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(webui_src, tmp_path / "webui")
     shutil.copy2(repo_root / "agent_config.json", tmp_path / "agent_config.json")
     settings = AppSettings(
         root_dir=tmp_path,
@@ -331,9 +356,15 @@ def _build_test_workspace(tmp_path: Path) -> AppSettings:
         config_path=tmp_path / "agent_config.json",
         command_timeout_sec=30,
         api_token="",
+        auth_required=True,
+        auth_tokens=dict(TEST_TOKENS),
     )
     _ensure_demo_runtime_data(settings)
     return settings
+
+
+def _token_headers(role: str) -> dict[str, str]:
+    return {"X-API-Token": TEST_TOKENS[role]}
 
 
 def _build_client(tmp_path: Path) -> tuple[TestClient, list[list[str]], AppSettings]:
@@ -350,7 +381,9 @@ def _build_client(tmp_path: Path) -> tuple[TestClient, list[list[str]], AppSetti
 
     settings = _build_test_workspace(tmp_path)
     app = create_app(settings=settings, command_runner=fake_runner)
-    return TestClient(app), calls, settings
+    client = TestClient(app)
+    client.headers.update(_token_headers("admin"))
+    return client, calls, settings
 
 
 def _copy_runtime_scripts(repo_root: Path, workspace_root: Path) -> None:
@@ -367,6 +400,8 @@ def _copy_runtime_scripts(repo_root: Path, workspace_root: Path) -> None:
         "agent_action_center.py",
         "agent_notifier.py",
         "agent_system.py",
+        "runtime_paths.py",
+        "state_io.py",
     ]
     for name in script_names:
         shutil.copy2(repo_root / name, workspace_root / name)
@@ -501,6 +536,76 @@ def test_mutation_endpoints_and_config_patch(tmp_path: Path) -> None:
     audit_path = settings.state_root / "webui_audit_log.jsonl"
     assert audit_path.exists()
     assert len(audit_path.read_text(encoding="utf-8").strip().splitlines()) >= 5
+
+
+def test_role_based_authz(tmp_path: Path) -> None:
+    settings = _build_test_workspace(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    _copy_runtime_scripts(repo_root, settings.root_dir)
+    client = TestClient(create_app(settings=settings))
+
+    read_resp = client.get("/api/action-center", headers=_token_headers("viewer"))
+    assert read_resp.status_code == 200
+
+    pending_review = client.get("/api/proposals/pending", headers=_token_headers("admin")).json()["items"]
+    review_run_id = pending_review[0]["run_id"]
+    viewer_review_resp = client.post(
+        f"/api/reviews/{review_run_id}",
+        json={"decision": "hold", "reviewer": "viewer", "note": "blocked"},
+        headers=_token_headers("viewer"),
+    )
+    assert viewer_review_resp.status_code == 403
+
+    reviewer_review_resp = client.post(
+        f"/api/reviews/{review_run_id}",
+        json={"decision": "hold", "reviewer": "reviewer", "note": "ok"},
+        headers=_token_headers("reviewer"),
+    )
+    assert reviewer_review_resp.status_code == 200
+
+    pending_execution = client.get("/api/executions/pending", headers=_token_headers("admin")).json()["items"]
+    exec_run_id = pending_execution[0]["run_id"]
+    reviewer_exec_resp = client.post(
+        f"/api/executions/{exec_run_id}",
+        json={"executor": "reviewer", "dry_run": True, "force": False},
+        headers=_token_headers("reviewer"),
+    )
+    assert reviewer_exec_resp.status_code == 403
+
+    executor_exec_resp = client.post(
+        f"/api/executions/{exec_run_id}",
+        json={"executor": "executor", "dry_run": True, "force": False},
+        headers=_token_headers("executor"),
+    )
+    assert executor_exec_resp.status_code == 200
+
+    viewer_sched_resp = client.post(
+        "/api/scheduler/once",
+        json={"dry_run": True},
+        headers=_token_headers("viewer"),
+    )
+    assert viewer_sched_resp.status_code == 403
+
+    admin_sched_resp = client.post(
+        "/api/scheduler/once",
+        json={"dry_run": True},
+        headers=_token_headers("admin"),
+    )
+    assert admin_sched_resp.status_code == 200
+
+    ask_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "ask", "message": "系统现在怎么样？"},
+        headers=_token_headers("viewer"),
+    )
+    assert ask_resp.status_code == 200
+
+    operation_resp = client.post(
+        "/api/agent/interact",
+        json={"mode": "operation", "message": "refresh alerts", "confirm": False},
+        headers=_token_headers("viewer"),
+    )
+    assert operation_resp.status_code == 403
 
 
 def test_execution_blocked_when_manual_only_enabled(tmp_path: Path) -> None:
@@ -686,12 +791,131 @@ def test_agent_interact_modes(tmp_path: Path) -> None:
     assert any(row.get("action") == "agent_interact" for row in rows)
 
 
+def test_repeat_review_submission_conflicts(tmp_path: Path) -> None:
+    settings = _build_test_workspace(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    _copy_runtime_scripts(repo_root, settings.root_dir)
+
+    client = TestClient(create_app(settings=settings))
+    client.headers.update(_token_headers("admin"))
+
+    pending_review = client.get("/api/proposals/pending").json()["items"]
+    review_run_id = pending_review[0]["run_id"]
+
+    first_resp = client.post(
+        f"/api/reviews/{review_run_id}",
+        json={"decision": "hold", "reviewer": "integration", "note": "first-pass"},
+    )
+    assert first_resp.status_code == 200
+
+    second_resp = client.post(
+        f"/api/reviews/{review_run_id}",
+        json={"decision": "hold", "reviewer": "integration", "note": "second-pass"},
+    )
+    assert second_resp.status_code == 409
+
+
+def test_repeat_execute_submission_conflicts(tmp_path: Path) -> None:
+    settings = _build_test_workspace(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    _copy_runtime_scripts(repo_root, settings.root_dir)
+
+    cfg = json.loads(settings.config_path.read_text(encoding="utf-8"))
+    execution_cfg = cfg.get("execution", {}) if isinstance(cfg.get("execution", {}), dict) else {}
+    execution_cfg["manual_only"] = False
+    cfg["execution"] = execution_cfg
+    settings.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    client = TestClient(create_app(settings=settings))
+    client.headers.update(_token_headers("admin"))
+
+    pending_execution = client.get("/api/executions/pending").json()["items"]
+    exec_run_id = pending_execution[0]["run_id"]
+
+    first_resp = client.post(
+        f"/api/executions/{exec_run_id}",
+        json={"executor": "integration", "dry_run": False, "force": False},
+    )
+    assert first_resp.status_code == 200
+
+    second_resp = client.post(
+        f"/api/executions/{exec_run_id}",
+        json={"executor": "integration", "dry_run": False, "force": False},
+    )
+    assert second_resp.status_code == 409
+
+
+def test_review_queue_lock_blocks_cli_review(tmp_path: Path) -> None:
+    settings = _build_test_workspace(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    _copy_runtime_scripts(repo_root, settings.root_dir)
+
+    pending_review = json.loads((settings.state_root / "review_queue.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    run_id = pending_review["run_id"]
+
+    with advisory_lock(settings.state_root / "queues.lock", timeout_sec=1.0):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(settings.root_dir / "agent_review.py"),
+                "--config",
+                str(settings.config_path),
+                "--run-id",
+                run_id,
+                "--decision",
+                "hold",
+                "--reviewer",
+                "lock-test",
+                "--note",
+                "blocked",
+                "--lock-timeout-sec",
+                "0.2",
+            ],
+            cwd=settings.root_dir,
+            text=True,
+            capture_output=True,
+        )
+
+    assert proc.returncode != 0
+    assert "queue is busy" in ((proc.stdout or "") + (proc.stderr or ""))
+
+
+def test_execution_queue_lock_blocks_cli_execute(tmp_path: Path) -> None:
+    settings = _build_test_workspace(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    _copy_runtime_scripts(repo_root, settings.root_dir)
+
+    with advisory_lock(settings.state_root / "queues.lock", timeout_sec=1.0):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(settings.root_dir / "agent_execute.py"),
+                "--config",
+                str(settings.config_path),
+                "--run-id",
+                "demo-exec-run-0001",
+                "--executor",
+                "lock-test",
+                "--dry-run",
+                "--lock-timeout-sec",
+                "0.2",
+            ],
+            cwd=settings.root_dir,
+            text=True,
+            capture_output=True,
+        )
+
+    assert proc.returncode != 0
+    assert "queue is busy" in ((proc.stdout or "") + (proc.stderr or ""))
+
+
 def test_real_command_runner_flow(tmp_path: Path) -> None:
     settings = _build_test_workspace(tmp_path)
     repo_root = Path(__file__).resolve().parents[1]
     _copy_runtime_scripts(repo_root, settings.root_dir)
 
     client = TestClient(create_app(settings=settings))
+    client.headers.update(_token_headers("admin"))
 
     pending_review = client.get("/api/proposals/pending").json()["items"]
     assert len(pending_review) > 0

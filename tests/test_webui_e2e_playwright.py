@@ -13,12 +13,25 @@ from urllib.request import urlopen
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+VIEWER_TOKEN = "viewer-token"
 
 
 def _build_test_workspace(tmp_path: Path) -> Path:
-    shutil.copytree(ROOT / "runs", tmp_path / "runs")
-    shutil.copytree(ROOT / "state", tmp_path / "state")
-    shutil.copytree(ROOT / "knowledge", tmp_path / "knowledge")
+    runs_src = ROOT / "runs"
+    state_src = ROOT / "state"
+    knowledge_src = ROOT / "knowledge"
+    if runs_src.exists():
+        shutil.copytree(runs_src, tmp_path / "runs")
+    else:
+        (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    if state_src.exists():
+        shutil.copytree(state_src, tmp_path / "state")
+    else:
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    if knowledge_src.exists():
+        shutil.copytree(knowledge_src, tmp_path / "knowledge")
+    else:
+        (tmp_path / "knowledge").mkdir(parents=True, exist_ok=True)
     shutil.copytree(ROOT / "webui", tmp_path / "webui")
     shutil.copy2(ROOT / "agent_config.json", tmp_path / "agent_config.json")
     return tmp_path
@@ -56,6 +69,7 @@ def _wait_for_server(base_url: str, proc: subprocess.Popen[str], timeout_sec: fl
 def _start_server(workspace: Path, port: int) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env["MYINVEST_ROOT"] = str(workspace)
+    env["MYINVEST_VIEWER_TOKEN"] = VIEWER_TOKEN
     return subprocess.Popen(
         [
             sys.executable,
@@ -108,7 +122,10 @@ def test_webui_language_switch_persists(tmp_path: Path) -> None:
                 pytest.skip(f"playwright browser is unavailable: {exc}")
 
             context = browser.new_context()
-            context.add_init_script("window.localStorage.setItem('myinvestment_locale', 'zh-CN');")
+            context.add_init_script(
+                f"window.localStorage.setItem('myinvestment_locale', 'zh-CN');"
+                f"window.localStorage.setItem('myinvestment_api_token', '{VIEWER_TOKEN}');"
+            )
             page = context.new_page()
 
             page.goto(base_url, wait_until="domcontentloaded")

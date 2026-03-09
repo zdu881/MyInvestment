@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from runtime_paths import resolve_runtime_paths
+
 
 def load_json(path: Path, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not path.exists():
@@ -178,8 +180,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    cfg = load_json(Path(args.config), default={})
-    paths = cfg.get("paths", {}) if isinstance(cfg.get("paths", {}), dict) else {}
+    cfg, runtime_paths = resolve_runtime_paths(Path(args.config))
     constraints_cfg = (
         cfg.get("constraints", {})
         if isinstance(cfg.get("constraints", {}), dict)
@@ -187,9 +188,10 @@ def main() -> int:
     )
     tz_hours = int(cfg.get("timezone_offset_hours", 8))
 
-    runs_root = Path(paths.get("runs_root", "runs"))
-    state_root = Path(paths.get("state_root", "state"))
-    knowledge_root = Path(paths.get("knowledge_root", "knowledge"))
+    runs_root = runtime_paths.runs_root
+    state_root = runtime_paths.state_root
+    knowledge_root = runtime_paths.knowledge_root
+    decision_log_path = runtime_paths.decision_log_path
 
     account_path = state_root / "account_snapshot.json"
     positions_path = state_root / "current_positions.csv"
@@ -228,7 +230,7 @@ def main() -> int:
     pending_review = count_pending_jsonl(state_root / "review_queue.jsonl")
     pending_execution = count_pending_jsonl(state_root / "execution_queue.jsonl")
     history_execution_lines = count_nonempty_lines(state_root / "execution_history.jsonl")
-    history_decision_lines = count_nonempty_lines(Path("decision_log.jsonl"))
+    history_decision_lines = count_nonempty_lines(decision_log_path)
 
     run_artifact_files = 0
     if runs_root.exists():
@@ -264,7 +266,7 @@ def main() -> int:
     }
 
     runtime_truncate_files = [
-        Path("decision_log.jsonl"),
+        decision_log_path,
         state_root / "review_queue.jsonl",
         state_root / "execution_queue.jsonl",
         state_root / "review_history.jsonl",

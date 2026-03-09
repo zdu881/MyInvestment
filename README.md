@@ -205,7 +205,11 @@ python3 agent_skill_manager.py
 - `MYINVEST_KNOWLEDGE_ROOT`：`knowledge` 相对路径（默认 `knowledge`）
 - `MYINVEST_CONFIG_PATH`：配置文件路径（默认 `agent_config.json`）
 - `MYINVEST_COMMAND_TIMEOUT_SEC`：命令超时（默认 `120`，最小 `10`）
-- `MYINVEST_API_TOKEN`：写接口 Token（未设置则不鉴权）
+- `MYINVEST_VIEWER_TOKEN`：只读接口 Token
+- `MYINVEST_REVIEWER_TOKEN`：审核接口 Token
+- `MYINVEST_EXECUTOR_TOKEN`：执行接口 Token
+- `MYINVEST_ADMIN_TOKEN`：配置 / onboarding / scheduler / operation Token
+- `MYINVEST_API_TOKEN`：兼容旧版的单 Token，未设置角色 Token 时按 `admin` 处理
 
 
 - `MYINVEST_NTFY_TOPIC`：ntfy topic（可覆盖配置中的 topic）
@@ -410,13 +414,13 @@ python3 agent_notifier.py \
 ## 10. 安全与治理建议
 
 当前实现：
-- `MYINVEST_API_TOKEN` 控制写接口
+- WebAPI 默认启用基于 Token 的角色鉴权（`viewer` / `reviewer` / `executor` / `admin`）
 - 写操作均有审计日志
 - 提案/执行前会检查是否仍为 pending
 
 建议在生产化时补强：
-- 角色权限（viewer/reviewer/executor/admin）
 - 反向代理层鉴权与访问控制
+- Token 轮换与密钥托管
 - 更细粒度命令白名单与速率限制
 
 ## 11. 常见问题
@@ -430,7 +434,7 @@ python3 agent_notifier.py \
 ### Q2: 写接口返回 401
 
 检查：
-- 是否设置了 `MYINVEST_API_TOKEN`
+- 是否设置了对应角色的 `MYINVEST_*_TOKEN`
 - 前端是否在右上角保存了对应 Token
 - Header 是否携带 `X-API-Token`
 

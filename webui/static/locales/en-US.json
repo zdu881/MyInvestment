@@ -5,7 +5,7 @@
   "header.language": "Language",
   "lang.zh": "Chinese",
   "lang.en": "English",
-  "token.placeholder": "Optional API Token",
+  "token.placeholder": "API Token",
   "token.save": "Save Token",
   "token.saved": "Token saved",
   "token.cleared": "Token cleared",

@@ -6,14 +6,17 @@
 ./scripts/start_webui.sh
 ```
 
-Optional environment variables:
+Recommended environment variables:
 
 ```bash
 export MYINVEST_ROOT=/data/home/sim6g/MyInvestment
-export MYINVEST_API_TOKEN=your_token
+export MYINVEST_VIEWER_TOKEN=viewer_token
+export MYINVEST_REVIEWER_TOKEN=reviewer_token
+export MYINVEST_EXECUTOR_TOKEN=executor_token
+export MYINVEST_ADMIN_TOKEN=admin_token
 ```
 
-If `MYINVEST_API_TOKEN` is set, mutating endpoints require header `X-API-Token`.
+API authentication is enabled by default. Provide one of the role tokens above via header `X-API-Token`.
 Web UI is served at:
 
 ```bash
@@ -22,7 +25,13 @@ http://localhost:8787/
 
 ## Run tests
 
-Use the provided wrapper to avoid external pytest plugin conflicts in this environment:
+Install dependencies first:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+Then use the provided wrapper to avoid external pytest plugin conflicts in this environment:
 
 ```bash
 ./scripts/run_tests.sh
