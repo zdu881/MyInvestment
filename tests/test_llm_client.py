@@ -117,8 +117,12 @@ def test_agent_system_falls_back_when_llm_errors(tmp_path: Path, monkeypatch) ->
     assert summary["llm"]["error"] == "provider unavailable"
 
 
-def test_llm_client_requires_api_key() -> None:
-    config = llm_client.LLMRuntimeConfig.from_runtime_config({"enabled": True}, environ={})
+def test_llm_client_requires_api_key(tmp_path: Path) -> None:
+    config = llm_client.LLMRuntimeConfig.from_runtime_config(
+        {"enabled": True, "env_file": ""},
+        environ={},
+        base_dir=tmp_path,
+    )
     with pytest.raises(llm_client.LLMClientError):
         llm_client.enhance_stock_research_summary(
             ticker="600519",
