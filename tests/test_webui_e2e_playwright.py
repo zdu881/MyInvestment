@@ -122,13 +122,18 @@ def test_webui_language_switch_persists(tmp_path: Path) -> None:
                 pytest.skip(f"playwright browser is unavailable: {exc}")
 
             context = browser.new_context()
-            context.add_init_script(
-                f"window.localStorage.setItem('myinvestment_locale', 'zh-CN');"
-                f"window.localStorage.setItem('myinvestment_api_token', '{VIEWER_TOKEN}');"
-            )
             page = context.new_page()
 
             page.goto(base_url, wait_until="domcontentloaded")
+            page.wait_for_selector("#languageSelect")
+            page.evaluate(
+                "([locale, token]) => {"
+                "window.localStorage.setItem('myinvestment_locale', locale);"
+                "window.localStorage.setItem('myinvestment_api_token', token);"
+                "}",
+                ["zh-CN", VIEWER_TOKEN],
+            )
+            page.reload(wait_until="domcontentloaded")
             page.wait_for_selector("#languageSelect")
 
             assert page.locator("#saveTokenBtn").inner_text().strip() == "保存 Token"
