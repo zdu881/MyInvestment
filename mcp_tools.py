@@ -18,10 +18,13 @@ Step 3 - MCP Tools 核心函数模块
 import json
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Dict, Any, Optional, List, Tuple
 
 import pandas as pd
 import akshare as ak
+
+from market_intelligence import MarketIntelligenceError, build_market_intelligence_report
 
 
 # =============================
@@ -264,40 +267,65 @@ def get_financial_health_check(ticker: str) -> Dict[str, Any]:
 
 
 # =============================
-# Tool 2: 市场情绪/负面信息（预留接口）
+# Tool 2: 市场情绪/负面信息
 # =============================
+@lru_cache(maxsize=1)
+def _load_a_share_name_mapping() -> Dict[str, str]:
+    """按需加载 A 股代码到名称的映射，提升新闻检索召回率。"""
+    spot_df = call_ak_with_retry("stock_zh_a_spot_em")
+    if spot_df is None:
+        return {}
+
+    code_col = find_first_existing_column(spot_df, ["代码", "symbol", "股票代码"])
+    name_col = find_first_existing_column(spot_df, ["名称", "name", "股票名称"])
+    if code_col is None or name_col is None:
+        return {}
+
+    data = spot_df.copy()
+    data["__code"] = data[code_col].astype(str).str.zfill(6)
+    mapping: Dict[str, str] = {}
+    for _, row in data.iterrows():
+        code = str(row.get("__code", "")).strip()
+        name = str(row.get(name_col, "")).strip()
+        if code and name and name != "nan":
+            mapping[code] = name
+    return mapping
+
+
+def _lookup_a_share_name(ticker: str) -> Optional[str]:
+    return _load_a_share_name_mapping().get(ticker)
+
+
 def search_market_sentiment(ticker: str) -> Dict[str, Any]:
-    """
-    预留接口：用于接入新闻搜索、监管公告、股东减持等外部数据源。
-
-    当前版本返回“模拟结构”，便于先打通 MCP 调用链路。
-    后续你可替换为：
-    - 自建检索 API
-    - 交易所公告抓取
-    - 第三方新闻 API
-    """
+    """检索公开新闻 RSS，输出标准化负面事件与风险摘要。"""
     symbol = normalize_ticker(ticker)
+    company_name = _lookup_a_share_name(symbol)
 
-    mock_findings = [
-        {
-            "date": "N/A",
-            "type": "placeholder",
-            "headline": "待接入真实新闻检索源",
-            "severity": "medium",
-            "note": "当前为 Step 3 占位数据，用于演示 MCP 工具调用。",
-        }
-    ]
+    try:
+        intelligence = build_market_intelligence_report(symbol, company_name=company_name)
+    except MarketIntelligenceError as exc:
+        return ToolResult(
+            ok=False,
+            tool="search_market_sentiment",
+            ticker=symbol,
+            data={"lookback_months": 3, "negative_events": []},
+            message=str(exc),
+        ).to_dict()
+    except Exception as exc:
+        return ToolResult(
+            ok=False,
+            tool="search_market_sentiment",
+            ticker=symbol,
+            data={"lookback_months": 3, "negative_events": []},
+            message=f"舆情检索异常：{exc}",
+        ).to_dict()
 
     return ToolResult(
         ok=True,
         tool="search_market_sentiment",
         ticker=symbol,
-        data={
-            "lookback_months": 3,
-            "negative_events": mock_findings,
-            "conclusion": "占位结果：未接入真实外部检索",
-        },
-        message="mocked",
+        data=intelligence,
+        message="success",
     ).to_dict()
 
 

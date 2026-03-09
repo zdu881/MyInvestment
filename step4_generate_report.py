@@ -121,9 +121,23 @@ def summarize_tool_outputs(health: Dict[str, Any], sentiment: Dict[str, Any], ah
             buy_reasons.append("经营现金流呈增长趋势")
 
     if sentiment.get("ok"):
-        negs = sentiment.get("data", {}).get("negative_events", [])
-        if len(negs) <= 1 and negs[0].get("type") == "placeholder":
-            risk_flags.append("外部舆情源未接入，需人工复核公告")
+        s_data = sentiment.get("data", {})
+        negs = s_data.get("negative_events", [])
+        categories = s_data.get("categories", [])
+        risk_score = s_data.get("risk_score")
+        if isinstance(risk_score, (int, float)) and risk_score >= 70:
+            risk_flags.append(f"近3个月舆情风险偏高（{risk_score:.1f}/100）")
+        elif isinstance(risk_score, (int, float)) and risk_score >= 40:
+            risk_flags.append(f"近3个月舆情风险中等（{risk_score:.1f}/100）")
+        elif not negs:
+            buy_reasons.append("近3个月未检索到明确负面舆情")
+
+        if "regulatory" in categories:
+            risk_flags.append("存在监管类负面舆情，需人工复核公告")
+        if "earnings_stress" in categories:
+            risk_flags.append("存在业绩承压信号，需核对预告与快报")
+    else:
+        risk_flags.append("舆情检查失败或缺失")
 
     if ah.get("ok"):
         p = ah.get("data", {}).get("ah_premium_pct")
