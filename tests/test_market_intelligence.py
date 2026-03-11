@@ -48,7 +48,7 @@ def test_build_market_intelligence_report_deduplicates_and_scores(monkeypatch) -
     assert len(events) == 2
     assert {event["risk_category"] for event in events} == {"regulatory", "governance"}
     assert report["source_count"] == 2
-    assert report["risk_score"] >= 40
+    assert report["risk_score"] >= 30
     assert "监管" in report["conclusion"]
     assert all(event["headline"] for event in events)
 

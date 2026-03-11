@@ -127,6 +127,13 @@ This document describes the first build milestone of the daily investment agent 
 - `agent_action_center.py` consolidates health, alerts, pending review queue, and pending execution queue into a single decision dashboard.
 - It is refreshed by scheduler by default and can be consumed as `runs/ops/action_center_latest.md`.
 
+## PDF ingest
+
+- PDF artifacts are no longer read as raw text; they are normalized through `document_ingest.py`.
+- Simple PDFs use built-in `pypdf` extraction and write cached sidecars to `knowledge/documents/<sha256>/`.
+- Complex PDFs can optionally use MinerU by setting `pdf_ingest.provider=mineru`; with `complex_only=true`, MinerU is only used for scanned/layout-heavy PDFs. The default MinerU backend is `pipeline`, which is safer for CPU-only environments.
+- Normalized sidecars include `full.md`, `content_list.json`, and `meta.json`.
+
 ## LLM integration
 
 - The agent supports SiliconFlow-compatible chat completion for postclose research refinement.

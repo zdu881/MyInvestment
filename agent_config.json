@@ -101,5 +101,22 @@
     "max_tokens": 320,
     "api_key_env": "SILICONFLOW_API_KEY",
     "env_file": ".env.local"
+  },
+  "pdf_ingest": {
+    "enabled": true,
+    "provider": "none",
+    "complex_only": true,
+    "cache_root": "knowledge/documents",
+    "simple_preview_pages": 6,
+    "simple_max_chars": 12000,
+    "complex_page_threshold": 12,
+    "low_text_chars_per_page": 120,
+    "large_file_bytes": 10485760,
+    "image_block_threshold": 3,
+    "mineru_cmd": "mineru",
+    "mineru_method": "auto",
+    "mineru_lang": "ch",
+    "mineru_timeout_sec": 300,
+    "mineru_backend": "pipeline"
   }
 }

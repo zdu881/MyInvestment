@@ -249,7 +249,7 @@ paths:
                     type: string
                   kind:
                     type: string
-                    enum: [json, jsonl, csv, markdown, text]
+                    enum: [json, jsonl, csv, markdown, text, pdf]
                   content:
                     type: string
         '400':
@@ -823,7 +823,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [json, jsonl, csv, markdown, text]
+          enum: [json, jsonl, csv, markdown, text, pdf]
         size:
           type: integer
 

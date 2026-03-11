@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from document_ingest import DocumentIngestor
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -106,6 +108,8 @@ class FileRepo:
             return "csv"
         if suffix == ".md":
             return "markdown"
+        if suffix == ".pdf":
+            return "pdf"
         return "text"
 
     def list_run_artifacts(self, run_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -156,6 +160,9 @@ class FileRepo:
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(str(path))
         kind = self.artifact_kind(path)
+        if kind == "pdf":
+            preview = DocumentIngestor(self.config_path, self.knowledge_root).preview_pdf(path)
+            return preview.content_kind, preview.preview_text
         text = path.read_text(encoding="utf-8", errors="replace")
         return kind, text
 
