@@ -132,6 +132,7 @@ This document describes the first build milestone of the daily investment agent 
 - PDF artifacts are no longer read as raw text; they are normalized through `document_ingest.py`.
 - Simple PDFs use built-in `pypdf` extraction and write cached sidecars to `knowledge/documents/<sha256>/`.
 - Complex PDFs can optionally use MinerU by setting `pdf_ingest.provider=mineru`; with `complex_only=true`, MinerU is only used for scanned/layout-heavy PDFs. The default MinerU backend is `pipeline`, which is safer for CPU-only environments.
+- If the local MinerU runtime is incomplete (for example missing `torch` for the `pipeline` backend), the system falls back to built-in preview generation and records the concise failure reason in `meta.json`.
 - Normalized sidecars include `full.md`, `content_list.json`, and `meta.json`.
 
 ## LLM integration

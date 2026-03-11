@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -157,7 +158,7 @@ class DocumentIngestor:
         return True
 
     def _run_mineru(self, pdf_path: Path, cache_dir: Path) -> None:
-        mineru_cmd = shutil.which(self.config.mineru_cmd)
+        mineru_cmd = shutil.which(os.path.expanduser(self.config.mineru_cmd))
         if not mineru_cmd:
             raise MinerUUnavailableError(f"MinerU command not found: {self.config.mineru_cmd}")
 
@@ -176,10 +177,24 @@ class DocumentIngestor:
         ]
         if self.config.mineru_lang:
             cmd.extend(["-l", self.config.mineru_lang])
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.config.mineru_timeout_sec)
+
+        env = os.environ.copy()
+        if self.config.mineru_backend == "pipeline":
+            env.setdefault("MINERU_DEVICE_MODE", "cpu")
+            env.setdefault("MINERU_VIRTUAL_VRAM_SIZE", "1")
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self.config.mineru_timeout_sec,
+            env=env,
+        )
+        error = summarize_mineru_error(proc.stdout, proc.stderr)
         if proc.returncode != 0:
-            error = (proc.stderr or proc.stdout or "").strip()
             raise MinerUExecutionError(error or f"mineru exited with code {proc.returncode}")
+        if not any(raw_dir.rglob("*.md")):
+            raise MinerUExecutionError(error or "MinerU completed without producing markdown output")
 
     def _normalize_mineru_outputs(self, cache_dir: Path, profile: PdfProfile) -> None:
         raw_dir = cache_dir / "mineru_raw"
@@ -350,6 +365,20 @@ def build_builtin_content_list(full_md_path: Path, page_count: int) -> List[Dict
             "source": "builtin_markdown",
         }
     ]
+
+
+def summarize_mineru_error(stdout: str, stderr: str) -> str:
+    for stream in (stderr, stdout):
+        text = (stream or "").strip()
+        if not text:
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if len(lines) > 1 or "traceback" in text.lower():
+            return lines[-1]
+        return lines[0]
+    return ""
 
 
 def file_sha256(path: Path) -> str:

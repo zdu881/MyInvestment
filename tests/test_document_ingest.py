@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import document_ingest
@@ -125,3 +126,43 @@ def test_file_repo_reads_pdf_artifact_via_document_ingest(tmp_path: Path) -> Non
     assert content_kind == "markdown"
     assert "Hello PDF World" in content
     assert any((tmp_path / "knowledge" / "documents").glob("*/full.md"))
+
+
+def test_mineru_zero_exit_without_output_falls_back_with_actionable_error(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_config(
+        tmp_path / "agent_config.json",
+        {
+            "provider": "mineru",
+            "complex_only": False,
+            "mineru_backend": "pipeline",
+        },
+    )
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(MINIMAL_TEXT_PDF)
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        raw_dir = Path(cmd[4])
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="",
+            stderr="2026-03-11 ERROR parse failed\nModuleNotFoundError: No module named 'torch'\n",
+        )
+
+    monkeypatch.setattr(document_ingest.shutil, "which", lambda cmd: f"/mock/bin/{Path(str(cmd)).name}")
+    monkeypatch.setattr(document_ingest.subprocess, "run", _fake_run)
+
+    ingestor = document_ingest.DocumentIngestor(config_path, tmp_path / "knowledge")
+    preview = ingestor.preview_pdf(pdf_path)
+    meta = json.loads(preview.meta_path.read_text(encoding="utf-8"))
+
+    assert meta["provider"] == "builtin_fallback"
+    assert meta["sidecar_error"] == "ModuleNotFoundError: No module named 'torch'"
+    assert preview.preview_text.startswith("> MinerU fallback: ModuleNotFoundError: No module named 'torch'")
+    assert captured["env"]["MINERU_DEVICE_MODE"] == "cpu"
+    assert captured["env"]["MINERU_VIRTUAL_VRAM_SIZE"] == "1"
