@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import site
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -178,18 +179,20 @@ class DocumentIngestor:
         if self.config.mineru_lang:
             cmd.extend(["-l", self.config.mineru_lang])
 
-        env = os.environ.copy()
-        if self.config.mineru_backend == "pipeline":
-            env.setdefault("MINERU_DEVICE_MODE", "cpu")
-            env.setdefault("MINERU_VIRTUAL_VRAM_SIZE", "1")
+        env = build_mineru_env(mineru_cmd, self.config.mineru_backend)
 
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=self.config.mineru_timeout_sec,
-            env=env,
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.config.mineru_timeout_sec,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MinerUExecutionError(
+                f"MinerU timed out after {self.config.mineru_timeout_sec}s"
+            ) from exc
         error = summarize_mineru_error(proc.stdout, proc.stderr)
         if proc.returncode != 0:
             raise MinerUExecutionError(error or f"mineru exited with code {proc.returncode}")
@@ -365,6 +368,47 @@ def build_builtin_content_list(full_md_path: Path, page_count: int) -> List[Dict
             "source": "builtin_markdown",
         }
     ]
+
+
+def build_mineru_env(mineru_cmd: str, backend: str) -> Dict[str, str]:
+    env = os.environ.copy()
+    if backend == "pipeline":
+        env.setdefault("MINERU_DEVICE_MODE", "cpu")
+        env.setdefault("MINERU_VIRTUAL_VRAM_SIZE", "1")
+        env.setdefault("USE_TF", "0")
+        env.setdefault("USE_TORCH", "1")
+
+    if is_uv_tool_script(mineru_cmd):
+        pythonpath = env.get("PYTHONPATH", "")
+        for entry in local_site_packages():
+            pythonpath = prepend_env_path(entry, pythonpath)
+        env["PYTHONPATH"] = pythonpath
+    return env
+
+
+def local_site_packages() -> List[str]:
+    entries: List[str] = []
+    candidate = site.getusersitepackages()
+    if candidate:
+        resolved = str(Path(candidate).resolve())
+        if Path(resolved).exists():
+            entries.append(resolved)
+    return entries
+
+
+def is_uv_tool_script(command_path: str) -> bool:
+    try:
+        first_line = Path(command_path).read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except Exception:
+        return False
+    return first_line.startswith("#!") and "/.local/share/uv/tools/" in first_line
+
+
+def prepend_env_path(entry: str, existing: str) -> str:
+    parts = [part for part in str(existing).split(os.pathsep) if part]
+    if entry not in parts:
+        parts.insert(0, entry)
+    return os.pathsep.join(parts)
 
 
 def summarize_mineru_error(stdout: str, stderr: str) -> str:

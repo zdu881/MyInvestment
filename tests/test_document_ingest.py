@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import site
 import subprocess
 from pathlib import Path
 
@@ -128,6 +129,52 @@ def test_file_repo_reads_pdf_artifact_via_document_ingest(tmp_path: Path) -> Non
     assert any((tmp_path / "knowledge" / "documents").glob("*/full.md"))
 
 
+def test_build_mineru_env_bridges_user_site_for_uv_tool_scripts(tmp_path: Path) -> None:
+    script = tmp_path / "mineru"
+    script.write_text("#!/home/nyz/.local/share/uv/tools/mineru/bin/python\nprint('stub')\n", encoding="utf-8")
+
+    env = document_ingest.build_mineru_env(str(script), "pipeline")
+
+    assert env["MINERU_DEVICE_MODE"] == "cpu"
+    assert env["MINERU_VIRTUAL_VRAM_SIZE"] == "1"
+    assert env["USE_TF"] == "0"
+    assert env["USE_TORCH"] == "1"
+    py_paths = env.get("PYTHONPATH", "").split(document_ingest.os.pathsep)
+    for expected in document_ingest.local_site_packages():
+        assert expected in py_paths
+
+
+def test_mineru_timeout_falls_back_cleanly(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_config(
+        tmp_path / "agent_config.json",
+        {
+            "provider": "mineru",
+            "complex_only": False,
+            "mineru_backend": "pipeline",
+            "mineru_timeout_sec": 7,
+        },
+    )
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(MINIMAL_TEXT_PDF)
+
+    mineru_script = tmp_path / "mineru"
+    mineru_script.write_text("#!/home/nyz/.local/share/uv/tools/mineru/bin/python\nprint('stub')\n", encoding="utf-8")
+
+    def _fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(kwargs.get("args", args[0]), timeout=7)
+
+    monkeypatch.setattr(document_ingest.shutil, "which", lambda cmd: str(mineru_script))
+    monkeypatch.setattr(document_ingest.subprocess, "run", _fake_run)
+
+    ingestor = document_ingest.DocumentIngestor(config_path, tmp_path / "knowledge")
+    preview = ingestor.preview_pdf(pdf_path)
+    meta = json.loads(preview.meta_path.read_text(encoding="utf-8"))
+
+    assert meta["provider"] == "builtin_fallback"
+    assert meta["sidecar_error"] == "MinerU timed out after 30s"
+    assert preview.preview_text.startswith("> MinerU fallback: MinerU timed out after 30s")
+
+
 def test_mineru_zero_exit_without_output_falls_back_with_actionable_error(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_config(
         tmp_path / "agent_config.json",
@@ -154,7 +201,9 @@ def test_mineru_zero_exit_without_output_falls_back_with_actionable_error(tmp_pa
             stderr="2026-03-11 ERROR parse failed\nModuleNotFoundError: No module named 'torch'\n",
         )
 
-    monkeypatch.setattr(document_ingest.shutil, "which", lambda cmd: f"/mock/bin/{Path(str(cmd)).name}")
+    mineru_script = tmp_path / "mineru"
+    mineru_script.write_text("#!/home/nyz/.local/share/uv/tools/mineru/bin/python\nprint('stub')\n", encoding="utf-8")
+    monkeypatch.setattr(document_ingest.shutil, "which", lambda cmd: str(mineru_script))
     monkeypatch.setattr(document_ingest.subprocess, "run", _fake_run)
 
     ingestor = document_ingest.DocumentIngestor(config_path, tmp_path / "knowledge")
@@ -166,3 +215,8 @@ def test_mineru_zero_exit_without_output_falls_back_with_actionable_error(tmp_pa
     assert preview.preview_text.startswith("> MinerU fallback: ModuleNotFoundError: No module named 'torch'")
     assert captured["env"]["MINERU_DEVICE_MODE"] == "cpu"
     assert captured["env"]["MINERU_VIRTUAL_VRAM_SIZE"] == "1"
+    assert captured["env"]["USE_TF"] == "0"
+    assert captured["env"]["USE_TORCH"] == "1"
+    py_paths = captured["env"]["PYTHONPATH"].split(document_ingest.os.pathsep)
+    for expected in document_ingest.local_site_packages():
+        assert expected in py_paths
