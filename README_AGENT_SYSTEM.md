@@ -114,6 +114,8 @@ This document describes the first build milestone of the daily investment agent 
 - Quality history is persisted in `state/proposal_quality_history.jsonl`.
 - Next-round selection feedback is persisted in `state/model_feedback.json`.
 - `agent_system.py` applies `min_confidence_buy`, `max_new_positions_override`, and penalty maps from `state/model_feedback.json` during target weight construction.
+- Empty-account runs no longer bootstrap a starter portfolio by default; if no candidate clears the new-position threshold, the proposal decision remains `stay_in_cash`.
+- Feedback learning policy is objective-only: execution artifacts are used, while `review_history.jsonl`, `human_decision`, and `review_note` are explicitly excluded from adaptive thresholds.
 
 ## Alert channel
 

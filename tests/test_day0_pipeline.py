@@ -47,7 +47,7 @@ def _read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def test_day0_bootstrap_rebalance_flow(tmp_path: Path) -> None:
+def test_day0_empty_account_stays_in_cash_without_high_conviction_buy(tmp_path: Path) -> None:
     config_path = tmp_path / "agent_config.json"
     _write_json(
         config_path,
@@ -64,7 +64,7 @@ def test_day0_bootstrap_rebalance_flow(tmp_path: Path) -> None:
                 "max_candidates_for_research": 8,
                 "max_new_positions": 3,
                 "default_transaction_cost_rate": 0.0015,
-                "bootstrap_on_empty_positions": True,
+                "bootstrap_on_empty_positions": False,
                 "bootstrap_max_positions": 3,
                 "bootstrap_min_score": 0.0,
             },
@@ -85,6 +85,9 @@ def test_day0_bootstrap_rebalance_flow(tmp_path: Path) -> None:
                 "max_cost_ratio_total_asset": 0.01,
                 "enforce_constraint_guard": True,
                 "constraint_tolerance": 0.001,
+            },
+            "feedback": {
+                "default_min_confidence_buy": 0.75,
             },
         },
     )
@@ -151,14 +154,14 @@ def test_day0_bootstrap_rebalance_flow(tmp_path: Path) -> None:
     run_dir = run_dirs[0]
 
     proposal = _read_json(run_dir / "allocation_proposal.json")
-    assert proposal["decision"] == "rebalance"
-    assert proposal.get("feedback_context", {}).get("bootstrap_mode") is True
-    assert "evidence_below_threshold_bootstrap_override" in proposal.get("gate_warnings", [])
+    assert proposal["decision"] == "stay_in_cash"
+    assert proposal.get("feedback_context", {}).get("selected_count") == 0
+    assert "evidence_below_threshold" in proposal.get("gate_failures", [])
+    assert proposal.get("abstain_context", {}).get("baseline") == "cash"
 
     rebalance_rows = _read_csv(run_dir / "rebalance_actions.csv")
     actionable = [row for row in rebalance_rows if str(row.get("action", "")) != "HOLD"]
-    assert len(actionable) == 3
-    assert all(str(row.get("action", "")) == "BUY" for row in actionable)
+    assert actionable == []
 
     review_proc = subprocess.run(
         [
@@ -183,35 +186,8 @@ def test_day0_bootstrap_rebalance_flow(tmp_path: Path) -> None:
 
     execution_queue = _read_jsonl(tmp_path / "state" / "execution_queue.jsonl")
     pending_items = [row for row in execution_queue if row.get("run_id") == run_id and row.get("status") == "pending"]
-    assert len(pending_items) == 1
-
-    orders_rows = _read_csv(run_dir / "execution_orders.csv")
-    assert len(orders_rows) == pending_items[0]["order_count"]
-    assert all(str(row.get("action", "")) == "BUY" for row in orders_rows)
-    assert all(float(row["target_weight"]) > 0 for row in orders_rows)
-
-    execute_proc = subprocess.run(
-        [
-            sys.executable,
-            str(EXEC_SCRIPT),
-            "--config",
-            str(config_path),
-            "--run-id",
-            run_id,
-            "--executor",
-            "day0_tester",
-            "--dry-run",
-        ],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-    )
-    assert execute_proc.returncode == 0, execute_proc.stdout + execute_proc.stderr
-
-    execution_result = _read_json(run_dir / "execution_result.json")
-    assert execution_result["dry_run"] is True
-    assert execution_result["position_count"] == len(orders_rows)
-    assert execution_result["note"] == "dry-run only, state not changed"
+    assert pending_items == []
+    assert not (run_dir / "execution_orders.csv").exists()
 
 
 def test_agent_execute_blocks_non_dry_run_in_manual_only_mode(tmp_path: Path) -> None:

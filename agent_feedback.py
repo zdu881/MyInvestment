@@ -9,6 +9,10 @@ generation by:
 1) scoring recent executed proposals
 2) persisting quality history
 3) generating model feedback for the next postclose run
+
+Learning policy:
+- objective execution artifacts only
+- exclude human review decisions, notes, and reviewer preferences
 """
 
 import argparse
@@ -18,6 +22,20 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional
+
+
+FEEDBACK_LEARNING_POLICY = "objective_execution_only"
+FEEDBACK_SOURCES_USED = [
+    "execution_history",
+    "allocation_proposal",
+    "execution_orders",
+    "stock_research",
+]
+FEEDBACK_SOURCES_EXCLUDED = [
+    "review_history",
+    "human_decision",
+    "review_note",
+]
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -181,7 +199,7 @@ def compute_quality_row(
     force_override = bool(execution_row.get("force_override", False))
     force_score = 0.6 if force_override else 1.0
 
-    action_score = 1.0 if action_count > 0 else 0.6
+    action_score = 0.75 if action_count > 0 else 1.0
 
     quality = (
         0.28 * evidence_score
@@ -226,19 +244,19 @@ def synthesize_feedback(
     avg_cost_ratio = mean([safe_float(r.get("cost_ratio"), 0.0) for r in rows]) if rows else 0.0
 
     if avg_quality >= 0.8:
-        min_confidence_buy = 0.55
-        max_new_positions_override = 3
+        min_confidence_buy = 0.65
+        max_new_positions_override = 2
     elif avg_quality >= 0.7:
-        min_confidence_buy = 0.60
-        max_new_positions_override = 3
+        min_confidence_buy = 0.72
+        max_new_positions_override = 2
     elif avg_quality >= 0.6:
-        min_confidence_buy = 0.68
+        min_confidence_buy = 0.78
         max_new_positions_override = 2
     elif avg_quality >= 0.5:
-        min_confidence_buy = 0.75
-        max_new_positions_override = 2
+        min_confidence_buy = 0.84
+        max_new_positions_override = 1
     else:
-        min_confidence_buy = 0.82
+        min_confidence_buy = 0.9
         max_new_positions_override = 1
 
     ticker_penalties: Dict[str, float] = {}
@@ -261,6 +279,10 @@ def synthesize_feedback(
 
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "learning_policy": FEEDBACK_LEARNING_POLICY,
+        "human_review_signals_included": False,
+        "sources_used": list(FEEDBACK_SOURCES_USED),
+        "sources_excluded": list(FEEDBACK_SOURCES_EXCLUDED),
         "quality_sample_size": sample_size,
         "average_quality_score": round(avg_quality, 4),
         "average_cost_ratio": round(avg_cost_ratio, 8),
@@ -280,6 +302,19 @@ def build_markdown(summary: Dict[str, Any], top_n: int = 10) -> str:
     lines.append(f"- sample_size: {summary['sample_size']}")
     lines.append(f"- avg_quality_score: {summary['avg_quality_score']:.4f}")
     lines.append(f"- avg_cost_ratio: {summary['avg_cost_ratio']:.4%}")
+    lines.append("")
+    lines.append("## Learning Policy")
+    lines.append("")
+    lines.append(f"- learning_policy: {summary['model_feedback']['learning_policy']}")
+    lines.append(
+        f"- human_review_signals_included: {summary['model_feedback']['human_review_signals_included']}"
+    )
+    lines.append(
+        "- sources_used: " + ", ".join(summary["model_feedback"].get("sources_used", []))
+    )
+    lines.append(
+        "- sources_excluded: " + ", ".join(summary["model_feedback"].get("sources_excluded", []))
+    )
     lines.append("")
     lines.append("## Next-Round Feedback")
     lines.append("")

@@ -11,6 +11,7 @@
 
 - 多阶段运行：`preopen` / `intraday` / `postclose` / `all`
 - 人工审核闭环：`approve` / `hold` / `reject`
+- 组合级结论显式支持 `stay_in_cash` / `hold` / `watch` / `rebalance`
 - 执行闭环：支持 `dry-run` 与 `force`，执行后状态与产物回写
 - 人工交易模式：`execution.manual_only=true` 时阻止非 dry-run 自动执行
 - 运维可观测：`ops_report`、`alerts`、`action_center`、`quality_feedback`
@@ -19,6 +20,7 @@
 - 前端 i18n：`zh-CN` / `en-US`，语言切换持久化
 - Agent 交互栏：`ask` / `plan` / `operation` 三模式（含 operation 预览与执行）
 - 入场初始化面板：在 WebUI `State & Config` 中可触发 `onboarding init`（支持 dry-run）
+- 反馈学习策略固定为“客观执行结果 only”，不使用人工 `hold/reject`、review note、reviewer 风格
 
 ## 2. 项目结构
 
@@ -111,6 +113,7 @@ python3 agent_init_state.py \
 说明：
 - 默认会把 `state/account_snapshot.json` 重置为“全现金、空仓位”。
 - 会重建 `state/current_positions.csv` 的空表头。
+- 日常 `postclose` 不会因空仓而自动 bootstrap 建仓；没有高确信度买点时会保持现金基线。
 - 加 `--reset-runtime` 会清理 `runs/`、队列、历史日志，适合把测试环境切回“未入场”。
 - 若检测到已有运行痕迹，脚本会要求你显式使用 `--reset-runtime` 或 `--force`，避免误覆盖。
 - 可先加 `--dry-run` 预览要执行的清理动作。

@@ -60,7 +60,7 @@ DEFAULT_CONFIG = {
         "max_candidates_for_research": 8,
         "max_new_positions": 3,
         "default_transaction_cost_rate": 0.0015,
-        "bootstrap_on_empty_positions": True,
+        "bootstrap_on_empty_positions": False,
         "bootstrap_max_positions": 3,
         "bootstrap_min_score": 0.0,
     },
@@ -79,7 +79,7 @@ DEFAULT_CONFIG = {
         "intraday_profit_alert_pct": 8.0,
     },
     "feedback": {
-        "default_min_confidence_buy": 0.6,
+        "default_min_confidence_buy": 0.75,
     },
     "llm": {
         "enabled": True,
@@ -282,6 +282,13 @@ class AgentSystem:
         payload = load_json(state_root / "model_feedback.json", default={})
         if not isinstance(payload, dict):
             return {}
+        # Guardrail: never adapt from human review preferences. Older payloads
+        # without explicit metadata are treated as execution-only legacy data.
+        if bool(payload.get("human_review_signals_included", False)):
+            return {}
+        learning_policy = str(payload.get("learning_policy", "")).strip().lower()
+        if learning_policy and learning_policy not in {"objective_execution_only", "legacy_execution_only"}:
+            return {}
         return payload
 
     def _run_script(self, script_name: str, log_path: Path) -> None:
@@ -455,6 +462,7 @@ class AgentSystem:
 
         risk_flags: List[str] = []
         thesis: List[str] = []
+        missing_evidence: List[str] = []
 
         h_ok = bool(health.get("ok"))
         s_ok = bool(sentiment.get("ok"))
@@ -472,6 +480,7 @@ class AgentSystem:
                 thesis.append("经营现金流趋势向上")
         else:
             risk_flags.append("财务健康检查失败或缺失")
+            missing_evidence.append("补全财务健康检查与现金流质量数据")
 
         if s_ok:
             s_data = sentiment.get("data", {})
@@ -491,6 +500,7 @@ class AgentSystem:
                 risk_flags.append("存在业绩承压信号，需核对预告与快报")
         else:
             risk_flags.append("舆情检查失败或缺失")
+            missing_evidence.append("补全近3个月舆情与公告核查")
 
         if ah_ok:
             premium = ah.get("data", {}).get("ah_premium_pct")
@@ -500,6 +510,7 @@ class AgentSystem:
                 thesis.append(f"A/H 溢价可控（{premium:.2f}%）")
         else:
             thesis.append("A/H 溢价信息不可用，不作为阻断项")
+            missing_evidence.append("补全跨市场估值对照")
 
         if not thesis:
             thesis.append("估值处于防御策略可跟踪区间")
@@ -519,12 +530,31 @@ class AgentSystem:
         else:
             verdict = "buy"
 
+        if verdict == "buy":
+            abstain_reason = ""
+            reentry_triggers: List[str] = []
+        else:
+            if confidence < 0.5:
+                abstain_reason = "工具证据不完整，当前更适合继续观察。"
+            elif risk_flags:
+                abstain_reason = "存在待消化风险信号，当前不满足防御型新开仓标准。"
+            else:
+                abstain_reason = "现有证据尚未证明开仓优于继续持币观察。"
+            reentry_triggers = [
+                "研究证据完整性继续提升，且核心工具结果彼此一致",
+                "负面舆情或监管风险消退，并完成公告复核",
+                "仍维持防御估值区间，且 confidence 达到新开仓阈值",
+            ]
+
         return {
             "ticker": ticker,
             "thesis": thesis[:3],
             "risk_flags": risk_flags[:4],
             "confidence": confidence,
             "verdict": verdict,
+            "abstain_reason": abstain_reason,
+            "missing_evidence": missing_evidence[:3],
+            "reentry_triggers": reentry_triggers[:3],
             "tool_evidence": tools,
             "analysis_mode": "heuristic",
         }
@@ -676,7 +706,7 @@ class AgentSystem:
         postclose_cfg = self.config.get("postclose", {})
         min_confidence_buy = safe_float(
             feedback.get("min_confidence_buy"),
-            safe_float(feedback_cfg.get("default_min_confidence_buy"), 0.6),
+            safe_float(feedback_cfg.get("default_min_confidence_buy"), 0.75),
         )
         ticker_penalties_raw = feedback.get("ticker_penalties", {})
         risk_flag_penalties_raw = feedback.get("risk_flag_penalties", {})
@@ -697,10 +727,6 @@ class AgentSystem:
         feedback_max_positions = safe_int(feedback.get("max_new_positions_override"), 0)
         max_positions = feedback_max_positions if feedback_max_positions > 0 else cfg_max_positions
         investable = max(0.0, 1.0 - min_cash)
-        bootstrap_on_empty_positions = bool(postclose_cfg.get("bootstrap_on_empty_positions", True))
-        bootstrap_max_positions = safe_int(postclose_cfg.get("bootstrap_max_positions"), 0)
-        bootstrap_min_score = safe_float(postclose_cfg.get("bootstrap_min_score"), 0.0)
-
         scored: List[Tuple[str, float]] = []
         df = candidate_df.copy()
         if not df.empty:
@@ -745,7 +771,6 @@ class AgentSystem:
             "buy_candidates_considered": len(scored),
             "buy_candidates_filtered_by_confidence": low_confidence_filtered,
             "selected_count": len(selected),
-            "bootstrap_mode": False,
         }
 
         target: Dict[str, float] = {}
@@ -754,27 +779,6 @@ class AgentSystem:
             for ticker in selected:
                 target[ticker] = round(equal_w, 4)
             return target, feedback_context
-
-        # Day-0 fallback: when account is empty and no candidate reaches "buy" verdict,
-        # bootstrap a small starter portfolio from top-scoring fundamentals.
-        if positions.empty and bootstrap_on_empty_positions and score_map:
-            ranking = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
-            limit = bootstrap_max_positions if bootstrap_max_positions > 0 else max_positions
-            limit = max(1, limit)
-            bootstrap_selected = [t for t, score in ranking if score >= bootstrap_min_score][:limit]
-            if bootstrap_selected:
-                equal_w = min(max_single, investable / len(bootstrap_selected))
-                for ticker in bootstrap_selected:
-                    target[ticker] = round(equal_w, 4)
-                feedback_context.update(
-                    {
-                        "bootstrap_mode": True,
-                        "bootstrap_reason": "empty_positions_and_no_buy_verdict",
-                        "bootstrap_selected_count": len(bootstrap_selected),
-                        "bootstrap_min_score": round(bootstrap_min_score, 4),
-                    }
-                )
-                return target, feedback_context
 
         # Fallback: keep existing top holdings if no buy candidates.
         if positions.empty:
@@ -915,6 +919,76 @@ class AgentSystem:
             )
         return pd.DataFrame(rows)
 
+    def _build_abstain_context(
+        self,
+        *,
+        decision: str,
+        positions: pd.DataFrame,
+        research_rows: List[Dict[str, Any]],
+        gate_failures: List[str],
+        actionable_count: int,
+        evidence_completeness: float,
+        min_evidence: float,
+        feedback_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        reasons: List[str] = []
+        triggers: List[str] = []
+        missing_evidence: List[str] = []
+
+        if decision == "rebalance":
+            return {
+                "baseline": "cash" if positions.empty else "hold_existing_positions",
+                "reasons": [],
+                "missing_evidence": [],
+                "reentry_triggers": [],
+                "trade_edge": "本轮交易方案已通过新开仓阈值、证据完整性与组合约束校验。",
+            }
+
+        if positions.empty:
+            reasons.append("当前基线为全现金，暂无标的同时满足新开仓门槛。")
+        if "evidence_below_threshold" in gate_failures:
+            reasons.append(
+                f"研究证据完整性仅为 {evidence_completeness:.2f}，低于开仓阈值 {min_evidence:.2f}。"
+            )
+        if "constraint_violations" in gate_failures:
+            reasons.append("候选目标组合未满足现金、行业或单票约束。")
+        if feedback_context.get("selected_count", 0) == 0:
+            reasons.append("候选池中没有标的同时满足 verdict=buy 与最小置信度要求。")
+        if not positions.empty and actionable_count == 0:
+            reasons.append("现有持仓暂未出现值得付出交易成本的显著调仓机会。")
+        if not reasons:
+            reasons.append("当前证据不支持交易方案显著优于维持现状。")
+
+        for item in research_rows:
+            for field in item.get("missing_evidence", []):
+                text = str(field).strip()
+                if text and text not in missing_evidence:
+                    missing_evidence.append(text)
+            for field in item.get("reentry_triggers", []):
+                text = str(field).strip()
+                if text and text not in triggers:
+                    triggers.append(text)
+
+        if not triggers:
+            triggers.extend(
+                [
+                    "至少出现一个候选标的同时满足 verdict=buy 与最小置信度要求",
+                    "新增仓位后仍满足现金比例、行业集中度与单票权重约束",
+                    "关键证据链完整，且不存在未消化的监管/业绩风险",
+                ]
+            )
+
+        if not missing_evidence and evidence_completeness < min_evidence:
+            missing_evidence.append("更多可交叉验证的财务、舆情与估值证据")
+
+        return {
+            "baseline": "cash" if positions.empty else "hold_existing_positions",
+            "reasons": reasons[:4],
+            "missing_evidence": missing_evidence[:4],
+            "reentry_triggers": triggers[:4],
+            "trade_edge": "",
+        }
+
     def _generate_advice_report(
         self,
         ctx: RunContext,
@@ -956,7 +1030,10 @@ class AgentSystem:
         lines.append("## 建议动作清单")
         lines.append("")
         if actions_df.empty:
-            lines.append("- 无需动作，建议保持现有仓位。")
+            if proposal.get("decision") == "stay_in_cash" and not proposal.get("base_portfolio"):
+                lines.append("- 无需动作，建议继续空仓观察。")
+            else:
+                lines.append("- 无需动作，建议保持现有仓位。")
         else:
             for _, row in actions_df.iterrows():
                 lines.append(
@@ -1011,6 +1088,21 @@ class AgentSystem:
         lines.append(
             f"- candidates_considered: {safe_int(feedback_ctx.get('buy_candidates_considered'), 0)} | filtered_by_confidence: {safe_int(feedback_ctx.get('buy_candidates_filtered_by_confidence'), 0)} | selected: {safe_int(feedback_ctx.get('selected_count'), 0)}"
         )
+        lines.append("")
+
+        lines.append("## 不交易基线")
+        lines.append("")
+        abstain_ctx = proposal.get("abstain_context", {}) if isinstance(proposal, dict) else {}
+        lines.append(f"- baseline: {abstain_ctx.get('baseline', 'unknown')}")
+        trade_edge = str(abstain_ctx.get("trade_edge", "")).strip()
+        if trade_edge:
+            lines.append(f"- trade_edge: {trade_edge}")
+        for reason in abstain_ctx.get("reasons", []) or []:
+            lines.append(f"- why_no_trade: {reason}")
+        for missing in abstain_ctx.get("missing_evidence", []) or []:
+            lines.append(f"- missing_evidence: {missing}")
+        for trigger in abstain_ctx.get("reentry_triggers", []) or []:
+            lines.append(f"- reentry_trigger: {trigger}")
         lines.append("")
 
         lines.append("## 执行约束")
@@ -1134,25 +1226,33 @@ class AgentSystem:
         gate_cfg = self.config.get("gates", {})
         min_evidence = safe_float(gate_cfg.get("min_evidence_completeness"), 0.6)
         max_violations = int(gate_cfg.get("max_allowed_constraint_violations", 0))
-        bootstrap_mode = bool(feedback_context.get("bootstrap_mode", False))
 
         gate_failures: List[str] = []
         gate_warnings: List[str] = []
         if hard_risk_block and positive_delta > 0:
             gate_failures.append("hard_risk_block_new_buy")
-        if evidence_completeness < min_evidence and not bootstrap_mode:
+        if evidence_completeness < min_evidence:
             gate_failures.append("evidence_below_threshold")
-        elif evidence_completeness < min_evidence and bootstrap_mode:
-            gate_warnings.append("evidence_below_threshold_bootstrap_override")
         if len(violations) > max_violations:
             gate_failures.append("constraint_violations")
 
         if gate_failures:
-            decision = "watch"
+            decision = "stay_in_cash" if positions.empty else "watch"
         elif actionable_count == 0:
-            decision = "hold"
+            decision = "stay_in_cash" if positions.empty else "hold"
         else:
             decision = "rebalance"
+
+        abstain_context = self._build_abstain_context(
+            decision=decision,
+            positions=positions,
+            research_rows=research_rows,
+            gate_failures=gate_failures,
+            actionable_count=actionable_count,
+            evidence_completeness=float(evidence_completeness),
+            min_evidence=min_evidence,
+            feedback_context=feedback_context,
+        )
 
         turnover = 0.0
         if not actions_df.empty:
@@ -1193,6 +1293,7 @@ class AgentSystem:
             "gate_failures": gate_failures,
             "gate_warnings": gate_warnings,
             "feedback_context": feedback_context,
+            "abstain_context": abstain_context,
             "decision": decision,
             "review_status": "pending_manual_review",
         }
@@ -1225,7 +1326,7 @@ class AgentSystem:
             "actionable_count": actionable_count,
             "gate_failures": gate_failures,
             "gate_warnings": gate_warnings,
-            "bootstrap_mode": bootstrap_mode,
+            "abstain_context": abstain_context,
             "decision": decision,
         }
 

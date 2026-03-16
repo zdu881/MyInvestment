@@ -16,7 +16,8 @@
   "postclose": {
     "max_candidates_for_research": 8,
     "max_new_positions": 3,
-    "default_transaction_cost_rate": 0.0015
+    "default_transaction_cost_rate": 0.0015,
+    "bootstrap_on_empty_positions": false
   },
   "gates": {
     "min_evidence_completeness": 0.6,
@@ -48,7 +49,7 @@
   },
   "feedback": {
     "quality_window_days": 30,
-    "default_min_confidence_buy": 0.6
+    "default_min_confidence_buy": 0.75
   },
   "skill_promotion": {
     "min_occurrences": 3,

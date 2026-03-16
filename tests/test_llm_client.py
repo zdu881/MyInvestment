@@ -41,6 +41,9 @@ def test_enhance_stock_research_summary_merges_conservatively(monkeypatch) -> No
                                     "confidence": 0.58,
                                     "verdict": "observe",
                                     "llm_rationale": "证据偏谨慎，先观察。",
+                                    "abstain_reason": "证据未证明此刻开仓优于继续观察。",
+                                    "missing_evidence": ["补全公告与舆情复核"],
+                                    "reentry_triggers": ["监管风险消退且 confidence 回升"],
                                 },
                                 ensure_ascii=False,
                             )
@@ -78,6 +81,9 @@ def test_enhance_stock_research_summary_merges_conservatively(monkeypatch) -> No
     assert result["thesis"][0] == "现金流改善"
     assert result["llm"]["model"] == "Pro/zai-org/GLM-5"
     assert result["llm_rationale"] == "证据偏谨慎，先观察。"
+    assert result["abstain_reason"] == "证据未证明此刻开仓优于继续观察。"
+    assert result["missing_evidence"] == ["补全公告与舆情复核"]
+    assert result["reentry_triggers"] == ["监管风险消退且 confidence 回升"]
 
 
 def test_agent_system_falls_back_when_llm_errors(tmp_path: Path, monkeypatch) -> None:

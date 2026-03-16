@@ -125,6 +125,8 @@ def main() -> int:
             if args.decision == "approve":
                 if proposal_decision == "rebalance":
                     final_action = "approved_rebalance"
+                elif proposal_decision == "stay_in_cash":
+                    final_action = "approved_stay_in_cash"
                 elif proposal_decision == "hold":
                     final_action = "approved_hold"
                 else:

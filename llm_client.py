@@ -170,6 +170,9 @@ def _build_stock_research_messages(
             "risk_flags": list(base_summary.get("risk_flags", [])),
             "confidence": base_summary.get("confidence"),
             "verdict": base_summary.get("verdict"),
+            "abstain_reason": base_summary.get("abstain_reason"),
+            "missing_evidence": list(base_summary.get("missing_evidence", [])),
+            "reentry_triggers": list(base_summary.get("reentry_triggers", [])),
         },
         "tool_evidence": tools,
     }
@@ -177,13 +180,16 @@ def _build_stock_research_messages(
         "你是 A 股防御型投资研究助手。"
         "你只能基于给定证据做判断，不得杜撰。"
         "输出必须是 JSON 对象，不要 markdown，不要额外解释。"
-        "JSON schema: {\"thesis\": [str], \"risk_flags\": [str], \"confidence\": number, \"verdict\": \"buy|observe|avoid\", \"llm_rationale\": str}."
-        "要求：thesis 最多 3 条，risk_flags 最多 4 条，confidence 介于 0 到 1，结论要保守，输出尽量简洁。"
+        "JSON schema: {\"thesis\": [str], \"risk_flags\": [str], \"confidence\": number, "
+        "\"verdict\": \"buy|observe|avoid\", \"llm_rationale\": str, \"abstain_reason\": str, "
+        "\"missing_evidence\": [str], \"reentry_triggers\": [str]}."
+        "要求：thesis 最多 3 条，risk_flags 最多 4 条，missing_evidence 最多 3 条，"
+        "reentry_triggers 最多 3 条，confidence 介于 0 到 1，结论要保守，输出尽量简洁。"
     )
     user_prompt = (
         "请基于以下证据，生成该股票的研究摘要。"
-        "优先保留可执行的买入逻辑与硬风险。"
-        "如果证据不足，请降低 confidence 并倾向 observe/avoid。\n"
+        "先判断是否值得交易，再补充买入逻辑与硬风险。"
+        "如果证据不足，请降低 confidence，并明确说明为什么此刻更适合不交易、还缺什么证据、什么条件下才允许重入。\n"
         f"{json.dumps(evidence, ensure_ascii=False, sort_keys=True)}"
     )
     return [
@@ -223,12 +229,22 @@ def _normalize_llm_summary(payload: Dict[str, Any], fallback: Dict[str, Any]) ->
         if verdict not in VERDICT_ORDER:
             verdict = "observe"
     rationale = str(payload.get("llm_rationale") or payload.get("rationale") or "").strip()
+    abstain_reason = str(payload.get("abstain_reason") or fallback.get("abstain_reason") or "").strip()
+    missing_evidence = _clean_string_list(payload.get("missing_evidence"), limit=3) or list(
+        fallback.get("missing_evidence", [])
+    )[:3]
+    reentry_triggers = _clean_string_list(payload.get("reentry_triggers"), limit=3) or list(
+        fallback.get("reentry_triggers", [])
+    )[:3]
     return {
         "thesis": thesis,
         "risk_flags": risk_flags,
         "confidence": round(confidence, 2),
         "verdict": verdict,
         "llm_rationale": rationale,
+        "abstain_reason": abstain_reason,
+        "missing_evidence": missing_evidence,
+        "reentry_triggers": reentry_triggers,
     }
 
 
@@ -243,6 +259,19 @@ def _merge_research_summary(base_summary: Dict[str, Any], llm_summary: Dict[str,
     merged["verdict"] = _more_conservative_verdict(
         str(base_summary.get("verdict") or "observe"),
         str(llm_summary.get("verdict") or "observe"),
+    )
+    merged["abstain_reason"] = str(
+        llm_summary.get("abstain_reason") or base_summary.get("abstain_reason") or ""
+    ).strip()
+    merged["missing_evidence"] = _merge_unique(
+        llm_summary.get("missing_evidence", []),
+        base_summary.get("missing_evidence", []),
+        limit=3,
+    )
+    merged["reentry_triggers"] = _merge_unique(
+        llm_summary.get("reentry_triggers", []),
+        base_summary.get("reentry_triggers", []),
+        limit=3,
     )
     return merged
 
