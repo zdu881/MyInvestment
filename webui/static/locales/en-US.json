@@ -118,6 +118,7 @@
   "execution.executorPlaceholder": "your_name",
   "execution.dryRun": "dry-run",
   "execution.force": "force",
+  "execution.confirmManualFill": "manual fills confirmed",
   "execution.submit": "Execute Task",
   "execution.selectFirst": "Please select an execution item first",
   "execution.submitSuccess": "Execution command submitted",

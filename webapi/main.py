@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from .services.command_runner import CommandResult, run_command
 from .services.file_repo import FileRepo
 from .settings import AppSettings
+from state_io import advisory_lock
 
 
 class ReviewSubmitRequest(BaseModel):
@@ -28,6 +29,7 @@ class ExecutionSubmitRequest(BaseModel):
     executor: str = Field(min_length=1)
     dry_run: bool = False
     force: bool = False
+    confirm_manual_fill: bool = False
 
 
 class SchedulerOnceRequest(BaseModel):
@@ -538,6 +540,10 @@ def _operation_guard_path(repo: FileRepo) -> Path:
     return repo.state_root / "agent_operation_guard.json"
 
 
+def _operation_guard_lock_path(repo: FileRepo) -> Path:
+    return repo.state_root / "agent_operation_guard.lock"
+
+
 def _read_operation_guard(repo: FileRepo) -> dict[str, Any]:
     data = repo.read_json(_operation_guard_path(repo), default={})
     pending = data.get("pending", {})
@@ -579,20 +585,21 @@ def _issue_operation_confirmation(
     options: dict[str, Any],
     user: str,
 ) -> dict[str, Any]:
-    now_utc = datetime.now(timezone.utc)
-    guard = _read_operation_guard(repo)
-    _cleanup_operation_guard(guard, now_utc)
+    with advisory_lock(_operation_guard_lock_path(repo), timeout_sec=5.0):
+        now_utc = datetime.now(timezone.utc)
+        guard = _read_operation_guard(repo)
+        _cleanup_operation_guard(guard, now_utc)
 
-    confirmation_id = uuid4().hex
-    expires_at = now_utc + timedelta(seconds=_OPERATION_CONFIRM_TTL_SEC)
-    guard["pending"][confirmation_id] = {
-        "operation_id": operation_id,
-        "fingerprint": _operation_fingerprint(operation_id, options),
-        "created_at": now_utc.isoformat(timespec="seconds"),
-        "expires_at": expires_at.isoformat(timespec="seconds"),
-        "user": user,
-    }
-    _write_operation_guard(repo, guard)
+        confirmation_id = uuid4().hex
+        expires_at = now_utc + timedelta(seconds=_OPERATION_CONFIRM_TTL_SEC)
+        guard["pending"][confirmation_id] = {
+            "operation_id": operation_id,
+            "fingerprint": _operation_fingerprint(operation_id, options),
+            "created_at": now_utc.isoformat(timespec="seconds"),
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+            "user": user,
+        }
+        _write_operation_guard(repo, guard)
     return {
         "required": True,
         "confirmation_id": confirmation_id,
@@ -608,30 +615,31 @@ def _validate_and_consume_operation_confirmation(
     operation_id: str,
     options: dict[str, Any],
 ) -> tuple[bool, str]:
-    now_utc = datetime.now(timezone.utc)
-    guard = _read_operation_guard(repo)
-    _cleanup_operation_guard(guard, now_utc)
-    pending = guard.get("pending", {})
-    row = pending.get(confirmation_id)
-    if not isinstance(row, dict):
-        _write_operation_guard(repo, guard)
-        return False, "confirmation id is missing or expired; please preview again"
+    with advisory_lock(_operation_guard_lock_path(repo), timeout_sec=5.0):
+        now_utc = datetime.now(timezone.utc)
+        guard = _read_operation_guard(repo)
+        _cleanup_operation_guard(guard, now_utc)
+        pending = guard.get("pending", {})
+        row = pending.get(confirmation_id)
+        if not isinstance(row, dict):
+            _write_operation_guard(repo, guard)
+            return False, "confirmation id is missing or expired; please preview again"
 
-    expected_op = str(row.get("operation_id", ""))
-    if expected_op != operation_id:
+        expected_op = str(row.get("operation_id", ""))
+        if expected_op != operation_id:
+            pending.pop(confirmation_id, None)
+            _write_operation_guard(repo, guard)
+            return False, "confirmation does not match selected operation"
+
+        expected_fingerprint = str(row.get("fingerprint", ""))
+        actual_fingerprint = _operation_fingerprint(operation_id, options)
+        if expected_fingerprint != actual_fingerprint:
+            pending.pop(confirmation_id, None)
+            _write_operation_guard(repo, guard)
+            return False, "confirmation does not match selected operation options"
+
         pending.pop(confirmation_id, None)
         _write_operation_guard(repo, guard)
-        return False, "confirmation does not match selected operation"
-
-    expected_fingerprint = str(row.get("fingerprint", ""))
-    actual_fingerprint = _operation_fingerprint(operation_id, options)
-    if expected_fingerprint != actual_fingerprint:
-        pending.pop(confirmation_id, None)
-        _write_operation_guard(repo, guard)
-        return False, "confirmation does not match selected operation options"
-
-    pending.pop(confirmation_id, None)
-    _write_operation_guard(repo, guard)
     return True, ""
 
 
@@ -641,21 +649,22 @@ def _check_operation_cooldown(
     operation_id: str,
     options: dict[str, Any],
 ) -> tuple[bool, int]:
-    now_utc = datetime.now(timezone.utc)
-    guard = _read_operation_guard(repo)
-    _cleanup_operation_guard(guard, now_utc)
-    key = _operation_fingerprint(operation_id, options)
-    last_exec = _safe_parse_ts(str(guard.get("last_exec", {}).get(key, "")))
-    if last_exec is None:
-        _write_operation_guard(repo, guard)
-        return True, 0
+    with advisory_lock(_operation_guard_lock_path(repo), timeout_sec=5.0):
+        now_utc = datetime.now(timezone.utc)
+        guard = _read_operation_guard(repo)
+        _cleanup_operation_guard(guard, now_utc)
+        key = _operation_fingerprint(operation_id, options)
+        last_exec = _safe_parse_ts(str(guard.get("last_exec", {}).get(key, "")))
+        if last_exec is None:
+            _write_operation_guard(repo, guard)
+            return True, 0
 
-    elapsed = int((now_utc - last_exec).total_seconds())
-    remain = _OPERATION_EXEC_COOLDOWN_SEC - elapsed
-    if remain > 0:
+        elapsed = int((now_utc - last_exec).total_seconds())
+        remain = _OPERATION_EXEC_COOLDOWN_SEC - elapsed
+        if remain > 0:
+            _write_operation_guard(repo, guard)
+            return False, remain
         _write_operation_guard(repo, guard)
-        return False, remain
-    _write_operation_guard(repo, guard)
     return True, 0
 
 
@@ -665,11 +674,12 @@ def _mark_operation_executed(
     operation_id: str,
     options: dict[str, Any],
 ) -> None:
-    guard = _read_operation_guard(repo)
-    _cleanup_operation_guard(guard, datetime.now(timezone.utc))
-    key = _operation_fingerprint(operation_id, options)
-    guard["last_exec"][key] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    _write_operation_guard(repo, guard)
+    with advisory_lock(_operation_guard_lock_path(repo), timeout_sec=5.0):
+        guard = _read_operation_guard(repo)
+        _cleanup_operation_guard(guard, datetime.now(timezone.utc))
+        key = _operation_fingerprint(operation_id, options)
+        guard["last_exec"][key] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _write_operation_guard(repo, guard)
 
 
 def _operation_history_path(repo: FileRepo) -> Path:
@@ -960,6 +970,24 @@ def create_app(
                 "execution is manual-only; set dry_run=true and place broker orders manually",
                 status=409,
             )
+        confirmation_required = _to_bool(execution_cfg.get("confirmation_required"), True)
+        if confirmation_required and not body.dry_run and not body.confirm_manual_fill:
+            payload = body.model_dump() | {
+                "run_id": run_id,
+                "blocked_reason": "manual_fill_confirmation_required",
+            }
+            _audit(
+                repo=repo,
+                action="execute_run_blocked",
+                payload=payload,
+                user=user,
+                command_result=None,
+            )
+            raise _error(
+                "manual_fill_confirmation_required",
+                "confirm broker-side manual fills before applying execution state",
+                status=409,
+            )
 
         if not repo.has_pending_execution(run_id):
             raise _error("conflict", f"run {run_id} is not pending execution", status=409)
@@ -975,6 +1003,8 @@ def create_app(
             command.append("--dry-run")
         if body.force:
             command.append("--force")
+        if body.confirm_manual_fill:
+            command.append("--confirm-manual-fill")
         result = runner(_inject_config_path(command, cfg.config_path), cfg.root_dir, cfg.command_timeout_sec)
         _audit(
             repo=repo,
@@ -1273,9 +1303,11 @@ def create_app(
     ) -> dict[str, Any]:
         if not isinstance(patch, dict):
             raise _error("bad_request", "patch body must be object", status=400)
-        current = repo.read_json(repo.config_path, default={})
-        merged = _deep_merge(current, patch)
-        repo.write_json(repo.config_path, merged)
+        config_lock_path = repo.config_path.with_name(f"{repo.config_path.name}.lock")
+        with advisory_lock(config_lock_path, timeout_sec=5.0):
+            current = repo.read_json(repo.config_path, default={})
+            merged = _deep_merge(current, patch)
+            repo.write_json(repo.config_path, merged)
         _audit(repo=repo, action="patch_config", payload=patch, user=user, command_result=None)
         return {
             "ok": True,

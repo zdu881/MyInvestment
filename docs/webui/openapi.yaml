@@ -815,12 +815,15 @@ components:
 
     ArtifactItem:
       type: object
-      required: [name, path, kind, size]
+      required: [name, path, artifact, kind, size]
       properties:
         name:
           type: string
         path:
           type: string
+        artifact:
+          type: string
+          description: Relative path to use with /api/runs/{runId}/artifact-content
         kind:
           type: string
           enum: [json, jsonl, csv, markdown, text, pdf]
@@ -996,6 +999,9 @@ components:
           type: boolean
           default: false
         force:
+          type: boolean
+          default: false
+        confirm_manual_fill:
           type: boolean
           default: false
 

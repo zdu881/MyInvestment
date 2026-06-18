@@ -329,23 +329,11 @@ def _ensure_demo_runtime_data(settings: AppSettings) -> None:
 
 def _build_test_workspace(tmp_path: Path) -> AppSettings:
     repo_root = Path(__file__).resolve().parents[1]
-    runs_src = repo_root / "runs"
-    state_src = repo_root / "state"
-    knowledge_src = repo_root / "knowledge"
     webui_src = repo_root / "webui"
 
-    if runs_src.exists():
-        shutil.copytree(runs_src, tmp_path / "runs")
-    else:
-        (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
-    if state_src.exists():
-        shutil.copytree(state_src, tmp_path / "state")
-    else:
-        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
-    if knowledge_src.exists():
-        shutil.copytree(knowledge_src, tmp_path / "knowledge")
-    else:
-        (tmp_path / "knowledge").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "knowledge").mkdir(parents=True, exist_ok=True)
     shutil.copytree(webui_src, tmp_path / "webui")
     shutil.copy2(repo_root / "agent_config.json", tmp_path / "agent_config.json")
     settings = AppSettings(
@@ -458,6 +446,24 @@ def test_run_detail_and_artifacts(tmp_path: Path) -> None:
     )
     assert content.status_code == 200
     assert content.json()["artifact"] == artifact_name
+
+
+def test_legacy_absolute_artifact_paths_resolve_inside_current_run_dir(tmp_path: Path) -> None:
+    client, _, settings = _build_client(tmp_path)
+    run_id = "demo-review-run-0001"
+    run_dir = settings.runs_root / "2026-01-02" / run_id
+    manifest_path = run_dir / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"] = [
+        "/old/workspace/MyInvestment/runs/2026-01-02/demo-review-run-0001/advice_report.md"
+    ]
+    _write_json(manifest_path, manifest)
+
+    artifacts = client.get(f"/api/runs/{run_id}/artifacts")
+    assert artifacts.status_code == 200
+    items = artifacts.json()["items"]
+    assert [item["name"] for item in items] == ["advice_report.md"]
+    assert items[0]["path"] == "runs/2026-01-02/demo-review-run-0001/advice_report.md"
 
 
 def test_proposal_and_pending_lists(tmp_path: Path) -> None:
@@ -644,6 +650,32 @@ def test_execution_blocked_when_manual_only_enabled(tmp_path: Path) -> None:
         if line.strip()
     ]
     assert any(row.get("action") == "execute_run_blocked" for row in rows)
+
+
+def test_execution_requires_manual_fill_confirmation_for_state_apply(tmp_path: Path) -> None:
+    settings = _build_test_workspace(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    _copy_runtime_scripts(repo_root, settings.root_dir)
+
+    cfg = json.loads(settings.config_path.read_text(encoding="utf-8"))
+    execution_cfg = cfg.get("execution", {}) if isinstance(cfg.get("execution", {}), dict) else {}
+    execution_cfg["manual_only"] = False
+    execution_cfg["confirmation_required"] = True
+    cfg["execution"] = execution_cfg
+    settings.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    client = TestClient(create_app(settings=settings))
+    client.headers.update(_token_headers("admin"))
+    run_id = client.get("/api/executions/pending").json()["items"][0]["run_id"]
+
+    resp = client.post(
+        f"/api/executions/{run_id}",
+        json={"executor": "integration", "dry_run": False, "force": False},
+    )
+
+    assert resp.status_code == 409
+    payload = resp.json()
+    assert payload["error_code"] == "manual_fill_confirmation_required"
 
 
 def test_agent_interact_modes(tmp_path: Path) -> None:
@@ -834,13 +866,23 @@ def test_repeat_execute_submission_conflicts(tmp_path: Path) -> None:
 
     first_resp = client.post(
         f"/api/executions/{exec_run_id}",
-        json={"executor": "integration", "dry_run": False, "force": False},
+        json={
+            "executor": "integration",
+            "dry_run": False,
+            "force": False,
+            "confirm_manual_fill": True,
+        },
     )
     assert first_resp.status_code == 200
 
     second_resp = client.post(
         f"/api/executions/{exec_run_id}",
-        json={"executor": "integration", "dry_run": False, "force": False},
+        json={
+            "executor": "integration",
+            "dry_run": False,
+            "force": False,
+            "confirm_manual_fill": True,
+        },
     )
     assert second_resp.status_code == 409
 
@@ -907,6 +949,40 @@ def test_execution_queue_lock_blocks_cli_execute(tmp_path: Path) -> None:
 
     assert proc.returncode != 0
     assert "queue is busy" in ((proc.stdout or "") + (proc.stderr or ""))
+
+
+def test_scheduler_ignores_stale_lock_file_when_no_process_holds_lock(tmp_path: Path) -> None:
+    settings = _build_test_workspace(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    _copy_runtime_scripts(repo_root, settings.root_dir)
+    (settings.runs_root / "scheduler.lock").write_text("stale-pid", encoding="utf-8")
+
+    cfg = json.loads(settings.config_path.read_text(encoding="utf-8"))
+    cfg["schedule"] = {"preopen": "never", "intraday": "never", "postclose": "never"}
+    settings.config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(settings.root_dir / "agent_scheduler.py"),
+            "--config",
+            str(settings.config_path),
+            "--once",
+            "--dry-run",
+            "--skip-maintenance",
+            "--skip-feedback",
+            "--skip-skill-promotion",
+            "--skip-alerts",
+            "--skip-notifier",
+            "--skip-action-center",
+        ],
+        cwd=settings.root_dir,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "no due phase" in ((proc.stdout or "") + (proc.stderr or ""))
 
 
 def test_real_command_runner_flow(tmp_path: Path) -> None:

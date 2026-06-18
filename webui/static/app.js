@@ -713,7 +713,7 @@ async function loadActionCenter() {
     <div class="item mono">
       <div><b>${escapeHtml(row.run_id)}</b></div>
       <div>${escapeHtml(row.proposal_id)} | ${escapeHtml(row.suggested_decision)}</div>
-      <button class="btn" onclick="setView('proposal-review'); selectProposal('${escapeHtml(row.run_id)}')">${escapeHtml(t('common.review'))}</button>
+      <button class="btn" data-action="open-proposal" data-run-id="${escapeHtml(row.run_id)}">${escapeHtml(t('common.review'))}</button>
     </div>
   `);
 
@@ -721,7 +721,7 @@ async function loadActionCenter() {
     <div class="item mono">
       <div><b>${escapeHtml(row.queue_id)}</b></div>
       <div>${escapeHtml(t('actionCenter.executionRow', { runId: row.run_id, orderCount: row.order_count }))}</div>
-      <button class="btn" onclick="setView('execution-queue'); selectExecution('${escapeHtml(row.run_id)}')">${escapeHtml(t('common.execute'))}</button>
+      <button class="btn" data-action="open-execution" data-run-id="${escapeHtml(row.run_id)}">${escapeHtml(t('common.execute'))}</button>
     </div>
   `);
 }
@@ -733,7 +733,7 @@ async function loadProposals() {
     <div class="item mono">
       <div><b>${escapeHtml(row.run_id)}</b></div>
       <div>${escapeHtml(row.proposal_id)} | ${escapeHtml(row.suggested_decision)}</div>
-      <button class="btn" onclick="selectProposal('${escapeHtml(row.run_id)}')">${escapeHtml(t('common.viewDetail'))}</button>
+      <button class="btn" data-action="select-proposal" data-run-id="${escapeHtml(row.run_id)}">${escapeHtml(t('common.viewDetail'))}</button>
     </div>
   `);
 
@@ -783,7 +783,7 @@ async function loadExecutions() {
       <div><b>${escapeHtml(row.run_id)}</b></div>
       <div>${escapeHtml(t('execution.queueRow', { queueId: row.queue_id }))}</div>
       <div>${escapeHtml(t('execution.orderRow', { count: row.order_count, createdAt: row.created_at }))}</div>
-      <button class="btn" onclick="selectExecution('${escapeHtml(row.run_id)}')">${escapeHtml(t('common.detail'))}</button>
+      <button class="btn" data-action="select-execution" data-run-id="${escapeHtml(row.run_id)}">${escapeHtml(t('common.detail'))}</button>
     </div>
   `);
 
@@ -818,7 +818,7 @@ async function loadRuns() {
     <div class="item mono">
       <div><b>${escapeHtml(row.run_id)}</b></div>
       <div>${escapeHtml(row.trading_date)} | ${escapeHtml(row.phase)} | ${escapeHtml(row.status)}</div>
-      <button class="btn" onclick="selectRun('${escapeHtml(row.run_id)}')">${escapeHtml(t('common.open'))}</button>
+      <button class="btn" data-action="select-run" data-run-id="${escapeHtml(row.run_id)}">${escapeHtml(t('common.open'))}</button>
     </div>
   `);
 
@@ -840,12 +840,12 @@ async function selectRun(runId) {
   renderList('artifactList', artifacts, (a) => `
     <div class="item mono">
       <div><b>${escapeHtml(a.name)}</b> (${escapeHtml(a.kind)})</div>
-      <button class="btn" onclick="readArtifact('${escapeHtml(runId)}', '${escapeHtml(a.name)}')">${escapeHtml(t('common.view'))}</button>
+      <button class="btn" data-action="read-artifact" data-run-id="${escapeHtml(runId)}" data-artifact="${escapeHtml(a.artifact || a.name)}">${escapeHtml(t('common.view'))}</button>
     </div>
   `);
 
   if (artifacts.length > 0) {
-    await readArtifact(runId, artifacts[0].name);
+    await readArtifact(runId, artifacts[0].artifact || artifacts[0].name);
   } else {
     byId('artifactContent').textContent = '';
   }
@@ -963,6 +963,32 @@ async function loadCurrentView() {
 }
 
 async function bindActions() {
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const action = String(btn.dataset.action || '');
+    const runId = String(btn.dataset.runId || '');
+    try {
+      if (action === 'open-proposal') {
+        setView('proposal-review');
+        await selectProposal(runId);
+      } else if (action === 'open-execution') {
+        setView('execution-queue');
+        await selectExecution(runId);
+      } else if (action === 'select-proposal') {
+        await selectProposal(runId);
+      } else if (action === 'select-execution') {
+        await selectExecution(runId);
+      } else if (action === 'select-run') {
+        await selectRun(runId);
+      } else if (action === 'read-artifact') {
+        await readArtifact(runId, String(btn.dataset.artifact || ''));
+      }
+    } catch (err) {
+      notify(err.message || String(err), true);
+    }
+  });
+
   byId('tabs').addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');
     if (!btn) return;
@@ -1054,6 +1080,7 @@ async function bindActions() {
           executor: byId('executorInput').value.trim(),
           dry_run: byId('executeDryRun').checked,
           force: byId('executeForce').checked,
+          confirm_manual_fill: byId('executeConfirmManualFill').checked,
         }),
       });
       notify(t('execution.submitSuccess'));
@@ -1207,12 +1234,6 @@ async function bindActions() {
   renderAgentConfirmation();
   renderAgentConversation();
 }
-
-window.setView = setView;
-window.selectProposal = selectProposal;
-window.selectExecution = selectExecution;
-window.selectRun = selectRun;
-window.readArtifact = readArtifact;
 
 state.locale = detectInitialLocale();
 state.agentMode = detectInitialAgentMode();

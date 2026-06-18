@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from document_ingest import DocumentIngestor
+from state_io import write_json_atomic
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -33,9 +34,7 @@ class FileRepo:
             return json.load(f)
 
     def write_json(self, path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        write_json_atomic(path, payload)
 
     def read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
@@ -72,7 +71,10 @@ class FileRepo:
     def find_run_dir(self, run_id: str) -> Path | None:
         if not run_id:
             return None
-        matches = sorted(self.runs_root.glob(f"*/{run_id}"))
+        raw = str(run_id).strip()
+        if not raw or any(ch in raw for ch in {"/", "\\", "*", "?", "["}) or ".." in Path(raw).parts:
+            return None
+        matches = sorted(self.runs_root.glob(f"*/{raw}"))
         if not matches:
             return None
         return matches[-1]
@@ -118,13 +120,8 @@ class FileRepo:
         if isinstance(artifacts, list) and artifacts:
             candidates = []
             for artifact in artifacts:
-                rel = Path(str(artifact))
-                # Artifacts are usually persisted as absolute-like workspace paths.
-                path = self.root_dir / rel
-                if not path.exists():
-                    # Fallback to file name within run dir.
-                    path = run_dir / rel.name
-                if path.exists():
+                path = self._resolve_run_artifact_path(run_dir, str(artifact))
+                if path is not None:
                     candidates.append(path)
         else:
             candidates = [p for p in run_dir.glob("*") if p.is_file()]
@@ -134,15 +131,44 @@ class FileRepo:
                 size = path.stat().st_size
             except FileNotFoundError:
                 continue
+            try:
+                rel_path = path.relative_to(self.root_dir)
+            except ValueError:
+                rel_path = path.relative_to(run_dir)
+            artifact_path = path.relative_to(run_dir)
             items.append(
                 {
                     "name": path.name,
-                    "path": str(path.relative_to(self.root_dir)),
+                    "path": str(rel_path),
+                    "artifact": str(artifact_path),
                     "kind": self.artifact_kind(path),
                     "size": int(size),
                 }
             )
         return items
+
+    def _resolve_run_artifact_path(self, run_dir: Path, raw_artifact: str) -> Path | None:
+        raw = str(raw_artifact or "").strip()
+        if not raw:
+            return None
+        rel = Path(raw)
+        run_root = run_dir.resolve()
+        candidates: list[Path] = []
+        if rel.is_absolute():
+            candidates.append(rel)
+        else:
+            candidates.extend([self.root_dir / rel, run_dir / rel])
+        candidates.append(run_dir / rel.name)
+
+        for candidate in candidates:
+            path = candidate.resolve()
+            try:
+                path.relative_to(run_root)
+            except ValueError:
+                continue
+            if path.exists() and path.is_file():
+                return path
+        return None
 
     def read_artifact_content(self, run_dir: Path, artifact: str) -> tuple[str, str]:
         if not artifact or artifact.startswith("/"):

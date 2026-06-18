@@ -118,6 +118,7 @@
   "execution.executorPlaceholder": "your_name",
   "execution.dryRun": "演练模式 (dry-run)",
   "execution.force": "强制执行 (force)",
+  "execution.confirmManualFill": "已确认券商端人工成交",
   "execution.submit": "执行任务",
   "execution.selectFirst": "请先选择执行项",
   "execution.submitSuccess": "执行命令提交成功",

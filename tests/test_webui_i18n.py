@@ -58,3 +58,11 @@ def test_app_js_translation_keys_exist() -> None:
     assert keys
     assert not (keys - set(zh.keys()))
     assert not (keys - set(en.keys()))
+
+
+def test_webui_does_not_use_inline_click_handlers() -> None:
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    js = APP_JS.read_text(encoding="utf-8")
+
+    assert "onclick=" not in html
+    assert "onclick=" not in js
