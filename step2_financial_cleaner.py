@@ -20,9 +20,14 @@ Step 2: 财务深度清洗（现金流真伪校验）
 
 # 导入标准库：os 用于文件判断，time 用于重试等待，traceback 用于打印错误堆栈
 import os
+import multiprocessing as mp
+from pathlib import Path
+import signal
 import time
 import traceback
-from typing import Optional, List, Tuple, Dict
+import threading
+from contextlib import contextmanager
+from typing import Any, Callable, Optional, List, Tuple, Dict
 
 # 导入第三方库：pandas 处理表格，akshare 拉财务数据
 import pandas as pd
@@ -57,17 +62,147 @@ INDUSTRY_OCF_THRESHOLD_RULES = [
     ("天然气", 0.8),
     ("电力", 0.8),
 ]
+
+def env_int(name: str, default: int) -> int:
+    try:
+        value = int(str(os.environ.get(name, "")).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        value = float(str(os.environ.get(name, "")).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
 # 网络请求最大重试次数
-MAX_RETRY = 3
+MAX_RETRY = env_int("STEP2_MAX_RETRY", 3)
 # 重试间隔（秒）
-RETRY_SLEEP_SECONDS = 1.2
+RETRY_SLEEP_SECONDS = env_float("STEP2_RETRY_SLEEP_SECONDS", 1.2)
 # 每只股票请求之间的休眠，减少限流概率
-PER_TICKER_SLEEP_SECONDS = 0.08
+PER_TICKER_SLEEP_SECONDS = env_float("STEP2_PER_TICKER_SLEEP_SECONDS", 0.08)
+# 单个 AkShare 调用超时（秒）
+AK_CALL_TIMEOUT_SECONDS = env_float("STEP2_AK_CALL_TIMEOUT_SECONDS", 8.0)
+# 单个 Baostock 调用超时（秒）
+BAOSTOCK_CALL_TIMEOUT_SECONDS = env_float("STEP2_BAOSTOCK_CALL_TIMEOUT_SECONDS", 8.0)
+# 单只股票完整财务计算超时（秒）
+PER_TICKER_TIMEOUT_SECONDS = env_float("STEP2_PER_TICKER_TIMEOUT_SECONDS", 15.0)
+# 行业映射加载超时（秒）
+INDUSTRY_MAP_TIMEOUT_SECONDS = env_float("STEP2_INDUSTRY_MAP_TIMEOUT_SECONDS", 8.0)
 
 
 # =============================
 # 通用工具函数
 # =============================
+class ExternalCallTimeout(TimeoutError):
+    """Raised when a third-party data source call exceeds its local timeout."""
+
+
+def _alarm_timeout_supported() -> bool:
+    return (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+
+
+def _fork_context():
+    try:
+        return mp.get_context("fork")
+    except ValueError:
+        return None
+
+
+def _process_timeout_supported() -> bool:
+    return mp.current_process().name == "MainProcess" and _fork_context() is not None
+
+
+def _timeout_worker(func: Callable[[], Any], queue) -> None:
+    try:
+        queue.put(("ok", func()))
+    except BaseException as exc:
+        queue.put(("error", type(exc).__name__, str(exc)))
+
+
+@contextmanager
+def timeout_after(timeout_sec: float, label: str):
+    if timeout_sec <= 0 or not _alarm_timeout_supported():
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started_at = time.monotonic()
+
+    def _handle_timeout(_signum, _frame):
+        raise ExternalCallTimeout(f"{label} timed out after {timeout_sec:.1f}s")
+
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_sec)
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - started_at
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            remaining = max(0.001, previous_timer[0] - elapsed)
+            signal.setitimer(signal.ITIMER_REAL, remaining, previous_timer[1])
+
+
+def run_with_timeout(func: Callable[[], Any], timeout_sec: float, label: str) -> Any:
+    if timeout_sec > 0 and _process_timeout_supported():
+        ctx = _fork_context()
+        if ctx is not None:
+            queue = ctx.Queue(maxsize=1)
+            proc = ctx.Process(target=_timeout_worker, args=(func, queue), daemon=True)
+            proc.start()
+            proc.join(timeout_sec)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(1.0)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(1.0)
+                raise ExternalCallTimeout(f"{label} timed out after {timeout_sec:.1f}s")
+            if queue.empty():
+                raise RuntimeError(f"{label} failed without returning a result (exitcode={proc.exitcode})")
+            payload = queue.get()
+            if payload[0] == "ok":
+                return payload[1]
+            raise RuntimeError(f"{label} failed: {payload[1]}: {payload[2]}")
+
+    with timeout_after(timeout_sec, label):
+        return func()
+
+
+def logout_baostock_safely() -> None:
+    if bs is None:
+        return
+    try:
+        bs.logout()
+    except Exception:
+        return
+
+
+def remove_output_file() -> None:
+    try:
+        Path(OUTPUT_CSV).unlink(missing_ok=True)
+    except Exception:
+        return
+
+
+def write_csv_atomic(df: pd.DataFrame, output_path: str) -> None:
+    path = Path(output_path)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    df.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+    os.replace(tmp_path, path)
+
+
 def safe_to_float(value) -> Optional[float]:
     """
     将各种可能格式的数据安全转换为 float。
@@ -119,14 +254,7 @@ def normalize_ticker(value: str) -> str:
     return digits.zfill(6)[-6:]
 
 
-def load_industry_map_from_baostock() -> Dict[str, str]:
-    """
-    从 Baostock 读取“股票代码->行业”映射。
-    返回示例：{"601668": "房屋建筑业"}
-    """
-    if bs is None:
-        return {}
-
+def _load_industry_map_from_baostock_unchecked() -> Dict[str, str]:
     login_result = bs.login()
     if login_result.error_code != "0":
         return {}
@@ -151,7 +279,26 @@ def load_industry_map_from_baostock() -> Dict[str, str]:
     except Exception:
         return {}
     finally:
-        bs.logout()
+        logout_baostock_safely()
+
+
+def load_industry_map_from_baostock() -> Dict[str, str]:
+    """
+    从 Baostock 读取“股票代码->行业”映射。
+    返回示例：{"601668": "房屋建筑业"}
+    """
+    if bs is None:
+        return {}
+
+    try:
+        result = run_with_timeout(
+            _load_industry_map_from_baostock_unchecked,
+            INDUSTRY_MAP_TIMEOUT_SECONDS,
+            "baostock query_stock_industry",
+        )
+        return result if isinstance(result, dict) else {}
+    except Exception:
+        return {}
 
 
 def get_threshold_by_industry(industry_text: str) -> float:
@@ -191,7 +338,11 @@ def _call_ak_function_with_retry(func_name: str, symbol: str) -> Optional[pd.Dat
     # 重试调用
     for i in range(1, MAX_RETRY + 1):
         try:
-            df = api_func(symbol=symbol)
+            df = run_with_timeout(
+                lambda: api_func(symbol=symbol),
+                AK_CALL_TIMEOUT_SECONDS,
+                f"akshare {func_name}({symbol})",
+            )
             if df is not None and not df.empty:
                 return df
             return None
@@ -251,22 +402,7 @@ def fetch_cashflow_and_profit(symbol: str) -> Tuple[Optional[pd.DataFrame], Opti
     return cashflow_df, profit_df, cashflow_api_used, profit_api_used
 
 
-def fetch_by_baostock(symbol: str) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
-    """
-    使用 Baostock 获取 OCF/净利润口径数据。
-
-    Baostock 的现金流接口直接提供 CFOToNP（经营现金流/净利润）比例，
-    利润表提供 netProfit。因此可反推出 OCF=ratio*netProfit。
-
-    返回：
-    - ocf
-    - net_income
-    - report_period
-    - source_tag
-    """
-    if bs is None:
-        return None, None, None, "baostock_unavailable"
-
+def _fetch_by_baostock_unchecked(symbol: str) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
     code = f"sh.{symbol}" if symbol.startswith("6") else f"sz.{symbol}"
 
     login_result = bs.login()
@@ -313,7 +449,35 @@ def fetch_by_baostock(symbol: str) -> Tuple[Optional[float], Optional[float], Op
         ocf = cfo_to_np * net_income
         return ocf, net_income, report_period, "baostock"
     finally:
-        bs.logout()
+        logout_baostock_safely()
+
+
+def fetch_by_baostock(symbol: str) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
+    """
+    使用 Baostock 获取 OCF/净利润口径数据。
+
+    Baostock 的现金流接口直接提供 CFOToNP（经营现金流/净利润）比例，
+    利润表提供 netProfit。因此可反推出 OCF=ratio*netProfit。
+
+    返回：
+    - ocf
+    - net_income
+    - report_period
+    - source_tag
+    """
+    if bs is None:
+        return None, None, None, "baostock_unavailable"
+
+    try:
+        return run_with_timeout(
+            lambda: _fetch_by_baostock_unchecked(symbol),
+            PER_TICKER_TIMEOUT_SECONDS,
+            f"baostock financial fetch {symbol}",
+        )
+    except ExternalCallTimeout:
+        return None, None, None, "baostock_timeout"
+    except Exception:
+        return None, None, None, "baostock_error"
 
 
 # =============================
@@ -490,6 +654,19 @@ def calculate_ocf_net_income_ratio(symbol: str) -> dict:
             "message": "success",
         }
 
+    except ExternalCallTimeout as e:
+        return {
+            "ticker": symbol,
+            "report_period": None,
+            "ocf": None,
+            "net_income": None,
+            "ocf_net_income_ratio": None,
+            "cashflow_api": "",
+            "profit_api": "",
+            "status": "error",
+            "source": "timeout",
+            "message": str(e),
+        }
     except Exception as e:
         return {
             "ticker": symbol,
@@ -508,7 +685,7 @@ def calculate_ocf_net_income_ratio(symbol: str) -> dict:
 # =============================
 # 主流程函数
 # =============================
-def main():
+def main() -> int:
     """
     主流程：
     1) 读取 Step 1 的候选文件
@@ -524,7 +701,7 @@ def main():
             )
 
         # 2) 读取 candidates.csv
-        candidates_df = pd.read_csv(INPUT_CSV)
+        candidates_df = pd.read_csv(INPUT_CSV, encoding="utf-8-sig")
         if candidates_df.empty:
             raise ValueError(f"{INPUT_CSV} 为空，没有可处理的股票。")
 
@@ -550,7 +727,25 @@ def main():
             if idx == 0 or (idx + 1) % 10 == 0 or idx + 1 == total:
                 print(f"[INFO] 正在处理财务数据：{idx + 1}/{total} - {ticker}")
 
-            metrics = calculate_ocf_net_income_ratio(ticker)
+            try:
+                metrics = run_with_timeout(
+                    lambda ticker=ticker: calculate_ocf_net_income_ratio(ticker),
+                    PER_TICKER_TIMEOUT_SECONDS,
+                    f"step2 ticker {ticker}",
+                )
+            except ExternalCallTimeout as e:
+                metrics = {
+                    "ticker": ticker,
+                    "report_period": None,
+                    "ocf": None,
+                    "net_income": None,
+                    "ocf_net_income_ratio": None,
+                    "cashflow_api": "",
+                    "profit_api": "",
+                    "status": "error",
+                    "source": "timeout",
+                    "message": str(e),
+                }
             metrics_rows.append(metrics)
 
             # 降低请求频率，减少触发限流风险
@@ -569,13 +764,22 @@ def main():
 
         # 6) 只保留计算成功的数据
         ok_df = metrics_df[metrics_df["status"] == "ok"].copy()
+        if ok_df.empty:
+            remove_output_file()
+            print("\n[ERROR] 所有候选股票的财务数据抓取均失败，已拒绝生成空的 Step 2 结果。")
+            fail_df = metrics_df[metrics_df["status"] != "ok"].copy()
+            if not fail_df.empty:
+                print("[INFO] 失败摘要（前10条）：")
+                print(fail_df[["ticker", "source", "message"]].head(10).to_string(index=False))
+            return 1
 
         # 7) 应用策略核心过滤：按行业阈值过滤
         ok_df = ok_df[ok_df["ocf_net_income_ratio"] > ok_df["行业阈值"]]
 
         # 8) 合并回原 candidates，得到“通过 Step 2 的最终结果”
+        metric_cols = ["ticker", "report_period", "ocf", "net_income", "ocf_net_income_ratio", "source"]
         merged = candidates_df.merge(
-            ok_df[["ticker", "report_period", "ocf", "net_income", "ocf_net_income_ratio", "source", "行业", "行业阈值"]],
+            ok_df[metric_cols],
             left_on="ticker_norm",
             right_on="ticker",
             how="inner",
@@ -609,7 +813,7 @@ def main():
                 output_df[col] = pd.to_numeric(output_df[col], errors="coerce").round(4)
 
         # 10) 导出结果
-        output_df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+        write_csv_atomic(output_df, OUTPUT_CSV)
         print(f"[SUCCESS] Step 2 完成，输出文件：{OUTPUT_CSV}，共 {len(output_df)} 条")
 
         # 11) 输出未通过原因摘要（方便你排查）
@@ -617,8 +821,10 @@ def main():
         if not fail_df.empty:
             print("\n[INFO] 以下股票在数据抓取或字段识别时失败（展示前10条）：")
             print(fail_df[["ticker", "message"]].head(10).to_string(index=False))
+        return 0
 
     except Exception as e:
+        remove_output_file()
         print("\n[ERROR] Step 2 执行失败：", e)
         print("[ERROR] 详细堆栈：")
         traceback.print_exc()
@@ -632,8 +838,9 @@ def main():
         print("4) 打印字段查看真实列名：")
         print("   python3 -c \"import akshare as ak; df=ak.stock_cash_flow_sheet_by_report_em(symbol='600000'); print(df.columns.tolist())\"")
         print("   python3 -c \"import akshare as ak; df=ak.stock_profit_sheet_by_report_em(symbol='600000'); print(df.columns.tolist())\"")
+        return 1
 
 
 # Python 入口
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
