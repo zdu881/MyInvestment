@@ -35,11 +35,11 @@ This document describes the first build milestone of the daily investment agent 
 - Manual review (approve/hold/reject):
   - `python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_name --note "approved after manual check"`
 - Execute approved task and update state:
-  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name`
+  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --confirm-manual-fill`
 - Execution dry-run (do not mutate state):
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run`
 - Force execution when cost guard blocks (use carefully):
-  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force`
+  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force --confirm-manual-fill`
 - Generate operations health report:
   - `python3 agent_ops_report.py --days 7`
 - Queue maintenance dry-run (stale mark + archive preview):
@@ -150,8 +150,10 @@ This document describes the first build milestone of the daily investment agent 
 
 - In `--dry-run` mode, external tools are not required.
 - In non-dry mode, `postclose` attempts to run `step1_screener.py` and `step2_financial_cleaner.py`.
-- If those scripts fail, existing candidate CSV files are still used as fallback when available.
+- If those scripts fail, `postclose` fails by default rather than using stale candidate CSV files.
+- Set `postclose.allow_stale_candidate_fallback=true` only when you intentionally want the older fallback behavior.
 - `agent_execute.py` writes state mutations only when not using `--dry-run`.
+- Non-dry execution requires `--confirm-manual-fill` by default, after broker-side manual orders are confirmed filled.
 - Execution cost model is configurable in `agent_config.json`:
   - `execution.slippage_bps`
   - `execution.commission_rate`

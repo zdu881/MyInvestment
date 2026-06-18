@@ -17,7 +17,8 @@
     "max_candidates_for_research": 8,
     "max_new_positions": 3,
     "default_transaction_cost_rate": 0.0015,
-    "bootstrap_on_empty_positions": false
+    "bootstrap_on_empty_positions": false,
+    "allow_stale_candidate_fallback": false
   },
   "gates": {
     "min_evidence_completeness": 0.6,
@@ -40,6 +41,7 @@
     "max_cost_ratio_total_asset": 0.005,
     "enforce_constraint_guard": true,
     "constraint_tolerance": 0.001,
+    "confirmation_required": true,
     "manual_only": true
   },
   "maintenance": {

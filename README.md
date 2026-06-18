@@ -70,8 +70,6 @@ MyInvestment/
 - `requests`
 - `pytest`
 - 可选：`playwright`（浏览器 E2E）
-
-业务数据源相关（按策略脚本需要，非 WebAPI 必需）：
 - `akshare`
 - `baostock`
 - `lixinger_openapi`
@@ -87,10 +85,12 @@ MyInvestment/
 ```
 
 默认监听：
-- `HOST=0.0.0.0`
+- `HOST=127.0.0.1`
 - `PORT=8787`
 
 打开：`http://localhost:8787/`
+
+如需让局域网其他设备访问，可显式设置 `HOST=0.0.0.0`，同时务必配置 API Token。
 
 ### 4.2 首次入场初始化（推荐）
 
@@ -166,6 +166,8 @@ python3 agent_system.py --phase postclose
 python3 agent_system.py --phase all
 ```
 
+非 dry-run 的 `postclose` 默认要求 `step1_screener.py` 和 `step2_financial_cleaner.py` 刷新成功；失败时不会自动复用旧候选池。只有明确设置 `postclose.allow_stale_candidate_fallback=true` 时才允许旧候选池兜底。
+
 ### 5.3 审核与执行
 
 ```bash
@@ -173,15 +175,16 @@ python3 agent_review.py --decision approve --run-id <RUN_ID> --reviewer your_nam
 python3 agent_review.py --decision hold --run-id <RUN_ID> --reviewer your_name --note "..."
 python3 agent_review.py --decision reject --run-id <RUN_ID> --reviewer your_name --note "..."
 
-python3 agent_execute.py --run-id <RUN_ID> --executor your_name
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run
-python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force
+python3 agent_execute.py --run-id <RUN_ID> --executor your_name --confirm-manual-fill
+python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force --confirm-manual-fill
 ```
 
 如果你当前仅做手动交易，建议：
 - 保持 `agent_config.json` 的 `execution.manual_only=true`
 - 只运行 `agent_execute.py --dry-run` 用于生成执行前检查与成本评估
 - 按 `execution_orders.csv` 在券商端手动下单
+- 如关闭 `manual_only` 并需要把结果写回状态，必须在确认券商端成交后加 `--confirm-manual-fill`
 
 ### 5.4 运维与反馈
 
@@ -215,7 +218,7 @@ python3 agent_skill_manager.py
 - `MYINVEST_API_TOKEN`：兼容旧版的单 Token，未设置角色 Token 时按 `admin` 处理
 
 
-- `MYINVEST_NTFY_TOPIC`：ntfy topic（可覆盖配置中的 topic）
+- `MYINVEST_NTFY_TOPIC`：ntfy topic（可覆盖配置中的 topic；默认通知关闭且 topic 为空）
 - `MYINVEST_NTFY_BASE_URL`：ntfy server 地址（默认 `https://ntfy.sh`）
 
 ### 6.2 API 路由

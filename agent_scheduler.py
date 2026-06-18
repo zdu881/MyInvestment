@@ -15,12 +15,13 @@ Recommended deployment:
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from state_io import LockTimeoutError, advisory_lock, write_json_atomic
 
 
 DEFAULT_SCHEDULE = {
@@ -38,9 +39,20 @@ def load_config(path: Path) -> Dict:
 
 
 def write_json(path: Path, payload: Dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_atomic(path, payload)
+
+
+def safe_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return default
 
 
 def parse_hhmm(value: str) -> Optional[tuple]:
@@ -236,7 +248,7 @@ def run_notifier(cfg: Dict, dry_run: bool) -> int:
         if isinstance(cfg.get("notifications", {}), dict)
         else {}
     )
-    if not bool(notifications_cfg.get("enabled", False)):
+    if not safe_bool(notifications_cfg.get("enabled", False)):
         print("[INFO] notifier is disabled in config")
         return 0
 
@@ -277,7 +289,7 @@ def run_notifier(cfg: Dict, dry_run: bool) -> int:
         "--ntfy-timeout-sec",
         str(float(ntfy_cfg.get("timeout_sec", 8.0))),
     ]
-    if bool(ntfy_cfg.get("enabled", True)):
+    if safe_bool(ntfy_cfg.get("enabled", False)):
         cmd.append("--ntfy-enabled")
     if dry_run:
         cmd.append("--dry-run")
@@ -310,13 +322,10 @@ def main() -> int:
     runs_root = Path(cfg.get("paths", {}).get("runs_root", "runs"))
     lock_path = runs_root / "scheduler.lock"
 
-    # Prevent concurrent scheduler executions.
-    lock_fd = None
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(lock_fd, str(os.getpid()).encode("utf-8"))
-    except FileExistsError:
+        lock_ctx = advisory_lock(lock_path, timeout_sec=0.0)
+        lock_ctx.__enter__()
+    except LockTimeoutError:
         print("[INFO] scheduler is already running, skip this trigger")
         return 0
 
@@ -407,10 +416,7 @@ def main() -> int:
 
         return 0
     finally:
-        if lock_fd is not None:
-            os.close(lock_fd)
-        if lock_path.exists():
-            lock_path.unlink()
+        lock_ctx.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

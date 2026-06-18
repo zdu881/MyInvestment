@@ -19,6 +19,11 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as f:
@@ -223,3 +228,73 @@ def test_agent_execute_blocks_non_dry_run_in_manual_only_mode(tmp_path: Path) ->
     assert proc.returncode != 0
     message = (proc.stdout or "") + (proc.stderr or "")
     assert "manual_only" in message
+
+
+def test_postclose_refuses_stale_candidates_when_refresh_fails(tmp_path: Path) -> None:
+    config_path = tmp_path / "agent_config.json"
+    _write_json(
+        config_path,
+        {
+            "timezone_offset_hours": 8,
+            "paths": {
+                "runs_root": "runs",
+                "state_root": "state",
+                "knowledge_root": "knowledge",
+                "step1_csv": "candidates.csv",
+                "step2_csv": "candidates_step2.csv",
+            },
+            "postclose": {
+                "max_candidates_for_research": 2,
+                "allow_stale_candidate_fallback": "false",
+            },
+        },
+    )
+    _write_csv(
+        tmp_path / "candidates_step2.csv",
+        fieldnames=["股票代码", "名称", "PE(TTM)", "PB", "股息率(%)", "行业"],
+        rows=[
+            {
+                "股票代码": "600000",
+                "名称": "浦发银行",
+                "PE(TTM)": "5.0",
+                "PB": "0.5",
+                "股息率(%)": "4.0",
+                "行业": "银行",
+            }
+        ],
+    )
+    _write_text(
+        tmp_path / "step1_screener.py",
+        "import sys\nprint('step1 failed on purpose')\nsys.exit(2)\n",
+    )
+    _write_text(
+        tmp_path / "step2_financial_cleaner.py",
+        "import sys\nprint('step2 failed on purpose')\nsys.exit(3)\n",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SYSTEM_SCRIPT),
+            "--phase",
+            "postclose",
+            "--config",
+            str(config_path),
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode != 0
+    output = (proc.stdout or "") + (proc.stderr or "")
+    assert "status=failed" in output
+
+    manifests = list((tmp_path / "runs").glob("*/*/run_manifest.json"))
+    assert len(manifests) == 1
+    manifest = _read_json(manifests[0])
+    assert manifest["status"] == "failed"
+    assert "refusing to use stale candidates" in manifest["error_summary"]
+    assert "step1_screener.py" in manifest["error_summary"]
+    assert "step2_financial_cleaner.py" in manifest["error_summary"]
+    assert _read_jsonl(tmp_path / "state" / "review_queue.jsonl") == []

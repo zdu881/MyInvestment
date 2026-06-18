@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import market_intelligence
 import mcp_tools
 from step4_generate_report import summarize_tool_outputs
@@ -36,7 +38,14 @@ RSS_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 def test_build_market_intelligence_report_deduplicates_and_scores(monkeypatch) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+            return fixed if tz is None else fixed.astimezone(tz)
+
     monkeypatch.setattr(market_intelligence, "fetch_google_news_rss", lambda *args, **kwargs: RSS_SAMPLE)
+    monkeypatch.setattr(market_intelligence, "datetime", FixedDatetime)
 
     report = market_intelligence.build_market_intelligence_report(
         "600519",

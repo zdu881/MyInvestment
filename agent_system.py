@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from runtime_paths import resolve_runtime_paths
+from state_io import advisory_lock, write_json_atomic, write_jsonl_atomic
 
 try:
     from llm_client import LLMClientError, LLMRuntimeConfig, enhance_stock_research_summary
@@ -63,6 +64,7 @@ DEFAULT_CONFIG = {
         "bootstrap_on_empty_positions": False,
         "bootstrap_max_positions": 3,
         "bootstrap_min_score": 0.0,
+        "allow_stale_candidate_fallback": False,
     },
     "gates": {
         "min_evidence_completeness": 0.6,
@@ -120,16 +122,11 @@ def load_json(path: Path, default: Optional[Dict[str, Any]] = None) -> Dict[str,
 
 
 def write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_atomic(path, payload)
 
 
 def write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_jsonl_atomic(path, rows)
 
 
 def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
@@ -164,6 +161,19 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return default
+
+
 def now_with_offset(hours: int) -> datetime:
     return datetime.now(timezone(timedelta(hours=hours)))
 
@@ -178,6 +188,7 @@ def score_candidate(row: pd.Series) -> float:
 class AgentSystem:
     def __init__(self, config_path: str) -> None:
         cfg, runtime_paths = resolve_runtime_paths(Path(config_path))
+        self.root_dir = runtime_paths.root_dir
         self.config = merge_dict(DEFAULT_CONFIG, cfg)
         self.paths = dict(self.config["paths"])
         self.paths["runs_root"] = str(runtime_paths.runs_root)
@@ -192,6 +203,15 @@ class AgentSystem:
             if LLMRuntimeConfig is not None
             else None
         )
+
+    def _artifact_ref(self, path: str | Path) -> str:
+        artifact_path = Path(path)
+        if not artifact_path.is_absolute():
+            artifact_path = (self.root_dir / artifact_path).resolve()
+        try:
+            return str(artifact_path.relative_to(self.root_dir))
+        except ValueError:
+            return str(artifact_path)
 
     def make_context(self) -> RunContext:
         tz_hours = int(self.config.get("timezone_offset_hours", 8))
@@ -437,8 +457,8 @@ class AgentSystem:
             return {
                 "health": {"ok": False, "message": "dry_run_or_tool_unavailable", "data": {}},
                 "sentiment": {
-                    "ok": True,
-                    "message": "mocked",
+                    "ok": False,
+                    "message": "dry_run_or_tool_unavailable",
                     "data": {
                         "risk_score": 0.0,
                         "source_count": 0,
@@ -1126,6 +1146,11 @@ class AgentSystem:
 
         step1_path = Path(self.paths["step1_csv"])
         step2_path = Path(self.paths["step2_csv"])
+        postclose_cfg = self.config.get("postclose", {})
+        allow_stale_candidate_fallback = safe_bool(
+            postclose_cfg.get("allow_stale_candidate_fallback", False)
+        )
+        refresh_errors: List[Tuple[str, Exception]] = []
 
         # Try to refresh candidates unless dry-run.
         if not dry_run:
@@ -1133,10 +1158,20 @@ class AgentSystem:
                 self._run_script("step1_screener.py", logs_dir / "step1.log")
             except Exception as e:
                 (logs_dir / "step1_error.txt").write_text(str(e), encoding="utf-8")
+                refresh_errors.append(("step1_screener.py", e))
             try:
                 self._run_script("step2_financial_cleaner.py", logs_dir / "step2.log")
             except Exception as e:
                 (logs_dir / "step2_error.txt").write_text(str(e), encoding="utf-8")
+                refresh_errors.append(("step2_financial_cleaner.py", e))
+
+        if refresh_errors and not allow_stale_candidate_fallback:
+            details = "; ".join(f"{name}: {err}" for name, err in refresh_errors)
+            raise RuntimeError(
+                "postclose candidate refresh failed; refusing to use stale candidates. "
+                "Set postclose.allow_stale_candidate_fallback=true to permit fallback. "
+                f"{details}"
+            )
 
         if step1_path.exists():
             copied_step1 = ctx.run_dir / "candidates_step1.csv"
@@ -1315,7 +1350,9 @@ class AgentSystem:
         review_request_path = ctx.run_dir / "review_request.json"
         write_json(review_request_path, review_request)
         artifacts.append(str(review_request_path))
-        append_jsonl(Path(self.paths["state_root"]) / "review_queue.jsonl", review_request)
+        state_root = Path(self.paths["state_root"])
+        with advisory_lock(state_root / "queues.lock", timeout_sec=10.0):
+            append_jsonl(state_root / "review_queue.jsonl", review_request)
 
         gate_result = {
             "hard_risk_block": hard_risk_block,
@@ -1419,7 +1456,7 @@ class AgentSystem:
             "status": status,
             "error_summary": error_summary,
             "steps": steps,
-            "artifacts": artifacts,
+            "artifacts": [self._artifact_ref(path) for path in artifacts],
         }
 
         manifest_path = ctx.run_dir / "run_manifest.json"

@@ -7,6 +7,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import agent_scheduler
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -256,3 +258,70 @@ def test_notifier_reads_topic_from_env(tmp_path: Path, monkeypatch) -> None:
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def test_scheduler_notifier_requires_explicit_ntfy_opt_in(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+
+    def fake_run(cmd: list[str]):
+        calls.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(agent_scheduler.subprocess, "run", fake_run)
+
+    ret = agent_scheduler.run_notifier(
+        {
+            "paths": {"state_root": "state"},
+            "notifications": {
+                "enabled": "true",
+                "send_events": "opened",
+                "send_levels": "warn",
+                "ntfy": {
+                    "enabled": "false",
+                },
+            },
+        },
+        dry_run=True,
+    )
+
+    assert ret == 0
+    assert len(calls) == 1
+    assert "--enabled" in calls[0]
+    assert "--dry-run" in calls[0]
+    assert "--ntfy-enabled" not in calls[0]
+
+
+def test_scheduler_notifier_enables_ntfy_when_explicit(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+
+    def fake_run(cmd: list[str]):
+        calls.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(agent_scheduler.subprocess, "run", fake_run)
+
+    ret = agent_scheduler.run_notifier(
+        {
+            "paths": {"state_root": "state"},
+            "notifications": {
+                "enabled": True,
+                "ntfy": {
+                    "enabled": True,
+                    "topic": "ops-topic",
+                },
+            },
+        },
+        dry_run=False,
+    )
+
+    assert ret == 0
+    assert len(calls) == 1
+    assert "--ntfy-enabled" in calls[0]
+    topic_index = calls[0].index("--ntfy-topic") + 1
+    assert calls[0][topic_index] == "ops-topic"

@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from runtime_paths import resolve_runtime_paths
-from state_io import LockTimeoutError, advisory_lock, write_jsonl_atomic
+from state_io import LockTimeoutError, advisory_lock, write_json_atomic, write_jsonl_atomic
 
 
 def load_json(path: Path) -> Dict:
@@ -29,9 +29,7 @@ def load_json(path: Path) -> Dict:
 
 
 def write_json(path: Path, payload: Dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_atomic(path, payload)
 
 
 def append_jsonl(path: Path, row: Dict) -> None:

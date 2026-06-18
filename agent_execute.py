@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from runtime_paths import RuntimePaths, resolve_runtime_paths
-from state_io import LockTimeoutError, advisory_lock, write_jsonl_atomic
+from state_io import LockTimeoutError, advisory_lock, write_json_atomic, write_jsonl_atomic
 
 DEFAULT_EXECUTION_SETTINGS = {
     "slippage_bps": 5.0,
@@ -77,9 +77,7 @@ def load_runtime_config(path: Path) -> Dict[str, Any]:
 
 
 def write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_atomic(path, payload)
 
 
 def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
@@ -617,6 +615,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs-root", default="")
     parser.add_argument("--timezone-offset-hours", type=int, default=8)
     parser.add_argument("--force", action="store_true", help="override execution cost guard")
+    parser.add_argument(
+        "--confirm-manual-fill",
+        action="store_true",
+        help="confirm broker-side manual orders were filled before applying state changes",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--lock-timeout-sec", type=float, default=10.0)
     return parser.parse_args()
@@ -737,6 +740,8 @@ def _run_locked_execution(
 
     if not orders_path.exists():
         warnings.append(f"execution orders file not found: {orders_path}")
+        if not args.dry_run:
+            raise SystemExit(f"execution orders file not found: {orders_path}")
 
     before_snapshot_path = run_dir / "portfolio_before_snapshot.csv"
     after_snapshot_path = run_dir / "portfolio_after_snapshot.csv"
@@ -841,6 +846,7 @@ def _run_locked_execution(
         "queue_id": str(queue_item.get("queue_id", "")),
         "executor": args.executor,
         "dry_run": args.dry_run,
+        "manual_fill_confirmed": bool(args.confirm_manual_fill),
         "before_total_asset": round(total_asset, 4),
         "before_position_count": len(before_positions_df),
         "position_count": len(new_rows),
@@ -957,9 +963,15 @@ def main() -> int:
     )
     cfg_execution = cfg.get("execution", {}) if isinstance(cfg, dict) else {}
     manual_only = safe_bool(cfg_execution.get("manual_only"), False)
+    confirmation_required = safe_bool(cfg_execution.get("confirmation_required"), True)
 
     if manual_only and not args.dry_run:
         raise SystemExit("execution manual_only is enabled; only --dry-run is allowed")
+    if confirmation_required and not args.dry_run and not args.confirm_manual_fill:
+        raise SystemExit(
+            "manual fill confirmation is required before applying execution state; "
+            "use --confirm-manual-fill after broker orders are filled"
+        )
 
     try:
         with advisory_lock(runtime_paths.state_root / "queues.lock", timeout_sec=args.lock_timeout_sec):
