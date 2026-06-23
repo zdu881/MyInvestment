@@ -18,7 +18,29 @@
     "max_new_positions": 3,
     "default_transaction_cost_rate": 0.0015,
     "bootstrap_on_empty_positions": false,
-    "allow_stale_candidate_fallback": false
+    "allow_stale_candidate_fallback": false,
+    "external_refresh_timeout_sec": 45.0
+  },
+  "strategy_lines": {
+    "enabled": true,
+    "mode": "parallel",
+    "value": {
+      "enabled": true,
+      "capital_weight": 0.65,
+      "max_positions": 3,
+      "max_single_weight": 0.3,
+      "min_confidence_buy": 0.75,
+      "allow_existing_fallback": true
+    },
+    "short": {
+      "enabled": true,
+      "capital_weight": 0.2,
+      "max_positions": 2,
+      "max_single_weight": 0.12,
+      "min_confidence_buy": 0.8,
+      "allow_existing_fallback": false,
+      "exclude_value_tickers": true
+    }
   },
   "gates": {
     "min_evidence_completeness": 0.6,

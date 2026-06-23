@@ -65,6 +65,28 @@ DEFAULT_CONFIG = {
         "bootstrap_max_positions": 3,
         "bootstrap_min_score": 0.0,
         "allow_stale_candidate_fallback": False,
+        "external_refresh_timeout_sec": 45.0,
+    },
+    "strategy_lines": {
+        "enabled": True,
+        "mode": "parallel",
+        "value": {
+            "enabled": True,
+            "capital_weight": 0.65,
+            "max_positions": 3,
+            "max_single_weight": 0.3,
+            "min_confidence_buy": 0.75,
+            "allow_existing_fallback": True,
+        },
+        "short": {
+            "enabled": True,
+            "capital_weight": 0.2,
+            "max_positions": 2,
+            "max_single_weight": 0.12,
+            "min_confidence_buy": 0.8,
+            "allow_existing_fallback": False,
+            "exclude_value_tickers": True,
+        },
     },
     "gates": {
         "min_evidence_completeness": 0.6,
@@ -311,22 +333,41 @@ class AgentSystem:
             return {}
         return payload
 
-    def _run_script(self, script_name: str, log_path: Path) -> None:
+    def _run_script(self, script_name: str, log_path: Path, timeout_sec: float | None = None) -> None:
         cmd = [sys.executable, script_name]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            stdout = proc.stdout
+            stderr = proc.stderr
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            returncode = -9
         text = "".join(
             [
                 f"$ {' '.join(cmd)}\n",
                 "\n[STDOUT]\n",
-                proc.stdout,
+                stdout,
                 "\n[STDERR]\n",
-                proc.stderr,
-                f"\n[RETURN_CODE] {proc.returncode}\n",
+                stderr,
+                f"\n[RETURN_CODE] {returncode}\n",
             ]
         )
+        if timeout_sec is not None and returncode == -9:
+            text += f"\n[TIMEOUT] exceeded {timeout_sec:.1f}s\n"
         log_path.write_text(text, encoding="utf-8")
-        if proc.returncode != 0:
-            raise RuntimeError(f"script failed: {script_name} (code={proc.returncode})")
+        if returncode != 0:
+            raise RuntimeError(f"script failed: {script_name} (code={returncode})")
 
     def run_preopen(self, ctx: RunContext, dry_run: bool) -> List[str]:
         positions = self._load_positions()
@@ -714,6 +755,164 @@ class AgentSystem:
 
         return run_skill_path
 
+    def _candidate_score_map(self, candidate_df: pd.DataFrame) -> Dict[str, float]:
+        df = candidate_df.copy()
+        if df.empty:
+            return {}
+        if "股票代码" not in df.columns and "ticker" in df.columns:
+            df["股票代码"] = df["ticker"]
+        if "股票代码" not in df.columns:
+            return {}
+        df["__score"] = df.apply(score_candidate, axis=1)
+        return {
+            normalize_ticker(r["股票代码"]): safe_float(r["__score"])
+            for _, r in df.iterrows()
+        }
+
+    def _feedback_controls(self) -> Dict[str, Any]:
+        feedback = self._load_model_feedback()
+        ticker_penalties_raw = feedback.get("ticker_penalties", {})
+        risk_flag_penalties_raw = feedback.get("risk_flag_penalties", {})
+        return {
+            "generated_at": str(feedback.get("generated_at", "")),
+            "average_quality_score": round(safe_float(feedback.get("average_quality_score"), 0.0), 4),
+            "quality_sample_size": safe_int(feedback.get("quality_sample_size"), 0),
+            "max_new_positions_override": safe_int(feedback.get("max_new_positions_override"), 0),
+            "min_confidence_buy": safe_float(feedback.get("min_confidence_buy"), 0.0),
+            "ticker_penalties": (
+                {normalize_ticker(k): safe_float(v, 0.0) for k, v in ticker_penalties_raw.items()}
+                if isinstance(ticker_penalties_raw, dict)
+                else {}
+            ),
+            "risk_flag_penalties": (
+                {str(k): safe_float(v, 0.0) for k, v in risk_flag_penalties_raw.items()}
+                if isinstance(risk_flag_penalties_raw, dict)
+                else {}
+            ),
+        }
+
+    def _build_line_target_weights(
+        self,
+        *,
+        line_id: str,
+        line_cfg: Dict[str, Any],
+        positions: pd.DataFrame,
+        candidate_df: pd.DataFrame,
+        research_rows: List[Dict[str, Any]],
+        account: Dict[str, Any],
+        feedback_controls: Dict[str, Any],
+        exclude_tickers: Optional[set[str]] = None,
+    ) -> Tuple[Dict[str, float], Dict[str, Any]]:
+        feedback_cfg = self.config.get("feedback", {})
+        postclose_cfg = self.config.get("postclose", {})
+        excluded = set(exclude_tickers or set())
+        ticker_penalties = feedback_controls.get("ticker_penalties", {})
+        risk_flag_penalties = feedback_controls.get("risk_flag_penalties", {})
+
+        max_single = min(
+            safe_float(account.get("max_single_weight"), 0.3),
+            safe_float(line_cfg.get("max_single_weight"), safe_float(account.get("max_single_weight"), 0.3)),
+        )
+        min_cash = safe_float(account.get("min_cash_ratio"), 0.1)
+        investable = max(0.0, 1.0 - min_cash)
+        capital_weight = max(0.0, min(safe_float(line_cfg.get("capital_weight"), investable), investable))
+        cfg_max_positions = safe_int(line_cfg.get("max_positions"), safe_int(postclose_cfg.get("max_new_positions"), 3))
+        feedback_max_positions = safe_int(feedback_controls.get("max_new_positions_override"), 0)
+        max_positions = feedback_max_positions if feedback_max_positions > 0 else cfg_max_positions
+        max_positions = max(0, max_positions)
+        default_min_confidence = safe_float(feedback_cfg.get("default_min_confidence_buy"), 0.75)
+        feedback_min_confidence = safe_float(feedback_controls.get("min_confidence_buy"), 0.0)
+        if feedback_min_confidence <= 0:
+            feedback_min_confidence = default_min_confidence
+        min_confidence_buy = safe_float(line_cfg.get("min_confidence_buy"), feedback_min_confidence)
+        allow_existing_fallback = safe_bool(line_cfg.get("allow_existing_fallback"), False)
+
+        score_map = self._candidate_score_map(candidate_df)
+        scored: List[Tuple[str, float]] = []
+        low_confidence_filtered = 0
+        excluded_filtered = 0
+        risk_filtered = 0
+        for item in research_rows:
+            if item.get("verdict") != "buy":
+                continue
+            confidence = safe_float(item.get("confidence"), 0.0)
+            if confidence < min_confidence_buy:
+                low_confidence_filtered += 1
+                continue
+            t = normalize_ticker(item["ticker"])
+            if t in excluded:
+                excluded_filtered += 1
+                continue
+            risk_penalty = 0.0
+            for flag in list(item.get("risk_flags", [])):
+                risk_penalty += safe_float(risk_flag_penalties.get(str(flag), 0.0), 0.0)
+            if risk_penalty >= 1.0:
+                risk_filtered += 1
+                continue
+            ticker_penalty = safe_float(ticker_penalties.get(t), 0.0)
+            score = score_map.get(t, 0.0) + confidence - ticker_penalty - risk_penalty
+            scored.append((t, score))
+
+        scored = sorted(scored, key=lambda x: x[1], reverse=True)
+        selected = [t for t, score in scored if score > 0][:max_positions]
+
+        target: Dict[str, float] = {}
+        if selected and capital_weight > 0 and max_positions > 0:
+            equal_w = min(max_single, capital_weight / len(selected))
+            for ticker in selected:
+                target[ticker] = round(equal_w, 4)
+        elif allow_existing_fallback and not positions.empty and capital_weight > 0 and max_positions > 0:
+            keep = positions.sort_values(by="weight", ascending=False).head(max_positions)
+            total_keep = keep["weight"].sum()
+            if total_keep <= 0:
+                equal_w = min(max_single, capital_weight / len(keep)) if len(keep) else 0.0
+                for _, row in keep.iterrows():
+                    target[normalize_ticker(row["ticker"])] = round(equal_w, 4)
+            else:
+                scale = capital_weight / total_keep
+                for _, row in keep.iterrows():
+                    w = min(max_single, safe_float(row.get("weight"), 0.0) * scale)
+                    target[normalize_ticker(row["ticker"])] = round(w, 4)
+
+        context = {
+            "line_id": line_id,
+            "enabled": True,
+            "capital_weight": round(capital_weight, 4),
+            "max_positions_config": cfg_max_positions,
+            "max_positions_applied": max_positions,
+            "max_single_weight": round(max_single, 4),
+            "min_confidence_buy": round(min_confidence_buy, 4),
+            "allow_existing_fallback": allow_existing_fallback,
+            "excluded_ticker_count": len(excluded),
+            "buy_candidates_considered": len(scored),
+            "buy_candidates_filtered_by_confidence": low_confidence_filtered,
+            "buy_candidates_filtered_by_exclusion": excluded_filtered,
+            "buy_candidates_filtered_by_risk": risk_filtered,
+            "selected_count": len(selected),
+            "selected_tickers": selected,
+            "target_weights": target,
+        }
+        return target, context
+
+    def _cap_and_scale_target_weights(
+        self, target_weights: Dict[str, float], account: Dict[str, Any]
+    ) -> Dict[str, float]:
+        if not target_weights:
+            return {}
+        max_single = safe_float(account.get("max_single_weight"), 0.3)
+        min_cash = safe_float(account.get("min_cash_ratio"), 0.1)
+        investable = max(0.0, 1.0 - min_cash)
+        capped = {
+            normalize_ticker(t): max(0.0, min(safe_float(w), max_single))
+            for t, w in target_weights.items()
+            if safe_float(w) > 0
+        }
+        total = sum(capped.values())
+        if total > investable and total > 0:
+            scale = investable / total
+            capped = {t: min(max_single, w * scale) for t, w in capped.items()}
+        return {t: round(w, 4) for t, w in capped.items() if w > 0}
+
     def _build_target_weights(
         self,
         positions: pd.DataFrame,
@@ -820,6 +1019,168 @@ class AgentSystem:
                 target[normalize_ticker(row["ticker"])] = round(w, 4)
 
         return target, feedback_context
+
+    def _build_parallel_target_weights(
+        self,
+        positions: pd.DataFrame,
+        candidate_df: pd.DataFrame,
+        research_rows: List[Dict[str, Any]],
+        account: Dict[str, Any],
+    ) -> Tuple[Dict[str, float], Dict[str, Any], Dict[str, Any]]:
+        strategy_cfg = self.config.get("strategy_lines", {})
+        if not safe_bool(strategy_cfg.get("enabled"), False):
+            target_weights, feedback_context = self._build_target_weights(
+                positions, candidate_df, research_rows, account
+            )
+            plan = {
+                "enabled": False,
+                "mode": "legacy_single_line",
+                "merged_target_weights": target_weights,
+                "lines": {},
+            }
+            feedback_context["strategy_mode"] = "legacy_single_line"
+            return target_weights, feedback_context, plan
+
+        feedback_controls = self._feedback_controls()
+        lines: Dict[str, Dict[str, Any]] = {}
+        combined: Dict[str, float] = {}
+
+        value_cfg = strategy_cfg.get("value", {})
+        value_target: Dict[str, float] = {}
+        if safe_bool(value_cfg.get("enabled"), True):
+            value_target, value_context = self._build_line_target_weights(
+                line_id="value",
+                line_cfg=value_cfg,
+                positions=positions,
+                candidate_df=candidate_df,
+                research_rows=research_rows,
+                account=account,
+                feedback_controls=feedback_controls,
+            )
+            lines["value"] = value_context
+            for ticker, weight in value_target.items():
+                combined[ticker] = combined.get(ticker, 0.0) + weight
+
+        short_cfg = strategy_cfg.get("short", {})
+        if safe_bool(short_cfg.get("enabled"), True):
+            exclude_tickers = set(value_target.keys()) if safe_bool(short_cfg.get("exclude_value_tickers"), True) else set()
+            short_target, short_context = self._build_line_target_weights(
+                line_id="short",
+                line_cfg=short_cfg,
+                positions=positions,
+                candidate_df=candidate_df,
+                research_rows=research_rows,
+                account=account,
+                feedback_controls=feedback_controls,
+                exclude_tickers=exclude_tickers,
+            )
+            lines["short"] = short_context
+            for ticker, weight in short_target.items():
+                combined[ticker] = combined.get(ticker, 0.0) + weight
+
+        target_weights = self._cap_and_scale_target_weights(combined, account)
+        selected_count = sum(safe_int(line.get("selected_count"), 0) for line in lines.values())
+        considered_count = sum(safe_int(line.get("buy_candidates_considered"), 0) for line in lines.values())
+        low_confidence_count = sum(
+            safe_int(line.get("buy_candidates_filtered_by_confidence"), 0)
+            for line in lines.values()
+        )
+        min_confidences = [
+            safe_float(line.get("min_confidence_buy"), 0.0)
+            for line in lines.values()
+            if safe_float(line.get("min_confidence_buy"), 0.0) > 0
+        ]
+
+        feedback_context = {
+            "strategy_mode": "parallel_lines",
+            "generated_at": str(feedback_controls.get("generated_at", "")),
+            "average_quality_score": round(safe_float(feedback_controls.get("average_quality_score"), 0.0), 4),
+            "quality_sample_size": safe_int(feedback_controls.get("quality_sample_size"), 0),
+            "min_confidence_buy": round(min(min_confidences), 4) if min_confidences else 0.0,
+            "max_new_positions_config": sum(
+                safe_int(line.get("max_positions_config"), 0) for line in lines.values()
+            ),
+            "max_new_positions_applied": sum(
+                safe_int(line.get("max_positions_applied"), 0) for line in lines.values()
+            ),
+            "ticker_penalty_count": len(feedback_controls.get("ticker_penalties", {})),
+            "risk_flag_penalty_count": len(feedback_controls.get("risk_flag_penalties", {})),
+            "buy_candidates_considered": considered_count,
+            "buy_candidates_filtered_by_confidence": low_confidence_count,
+            "selected_count": selected_count,
+            "lines": lines,
+        }
+        plan = {
+            "enabled": True,
+            "mode": "parallel_lines",
+            "lines": lines,
+            "merged_target_weights": target_weights,
+            "merge_policy": {
+                "max_single_weight": round(safe_float(account.get("max_single_weight"), 0.3), 4),
+                "min_cash_ratio": round(safe_float(account.get("min_cash_ratio"), 0.1), 4),
+                "duplicate_line_weights_are_summed_then_capped": True,
+            },
+        }
+        return target_weights, feedback_context, plan
+
+    def _name_map(self, positions: pd.DataFrame, candidate_df: pd.DataFrame) -> Dict[str, str]:
+        names: Dict[str, str] = {}
+        if not positions.empty:
+            for _, row in positions.iterrows():
+                names[normalize_ticker(row.get("ticker"))] = str(row.get("name", "N/A"))
+        if not candidate_df.empty:
+            ticker_col = "股票代码" if "股票代码" in candidate_df.columns else "ticker"
+            if ticker_col in candidate_df.columns:
+                for _, row in candidate_df.iterrows():
+                    names[normalize_ticker(row.get(ticker_col))] = str(row.get("名称", row.get("name", "N/A")))
+        return names
+
+    def _build_strategy_line_allocations(
+        self,
+        strategy_plan: Dict[str, Any],
+        positions: pd.DataFrame,
+        candidate_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        columns = [
+            "line_id",
+            "ticker",
+            "name",
+            "line_target_weight",
+            "merged_target_weight",
+            "selected_by_line",
+            "line_budget",
+        ]
+        if not strategy_plan.get("enabled"):
+            return pd.DataFrame(columns=columns)
+        names = self._name_map(positions, candidate_df)
+        merged = strategy_plan.get("merged_target_weights", {})
+        rows: List[Dict[str, Any]] = []
+        lines = strategy_plan.get("lines", {})
+        if not isinstance(lines, dict):
+            return pd.DataFrame(columns=columns)
+        for line_id, line in lines.items():
+            if not isinstance(line, dict):
+                continue
+            target = line.get("target_weights", {})
+            selected = set(str(t) for t in line.get("selected_tickers", []) or [])
+            if not isinstance(target, dict):
+                continue
+            for ticker_raw, weight_raw in sorted(target.items()):
+                ticker = normalize_ticker(ticker_raw)
+                rows.append(
+                    {
+                        "line_id": line_id,
+                        "ticker": ticker,
+                        "name": names.get(ticker, "N/A"),
+                        "line_target_weight": round(safe_float(weight_raw), 4),
+                        "merged_target_weight": round(safe_float(merged.get(ticker), 0.0), 4),
+                        "selected_by_line": ticker in selected,
+                        "line_budget": round(safe_float(line.get("capital_weight"), 0.0), 4),
+                    }
+                )
+        if not rows:
+            return pd.DataFrame(columns=columns)
+        return pd.DataFrame(rows, columns=columns)
 
     def _industry_map(self, positions: pd.DataFrame, candidate_df: pd.DataFrame) -> Dict[str, str]:
         out: Dict[str, str] = {}
@@ -1038,6 +1399,22 @@ class AgentSystem:
         )
         lines.append("")
 
+        strategy_plan = proposal.get("strategy_lines", {}) if isinstance(proposal, dict) else {}
+        if isinstance(strategy_plan, dict) and strategy_plan.get("enabled"):
+            lines.append("## 双线策略")
+            lines.append("")
+            lines.append(f"- mode: {strategy_plan.get('mode', 'parallel_lines')}")
+            line_map = strategy_plan.get("lines", {})
+            if isinstance(line_map, dict):
+                for line_id in ["value", "short"]:
+                    line = line_map.get(line_id, {})
+                    if not isinstance(line, dict):
+                        continue
+                    lines.append(
+                        f"- {line_id}: budget={safe_float(line.get('capital_weight'), 0.0):.2%}, max_single={safe_float(line.get('max_single_weight'), 0.0):.2%}, selected={safe_int(line.get('selected_count'), 0)}"
+                    )
+            lines.append("")
+
         lines.append("## 当前组合体检")
         lines.append("")
         lines.append(f"- total_asset: {account['total_asset']:.2f}")
@@ -1150,47 +1527,94 @@ class AgentSystem:
         allow_stale_candidate_fallback = safe_bool(
             postclose_cfg.get("allow_stale_candidate_fallback", False)
         )
+        external_refresh_timeout_sec = safe_float(
+            postclose_cfg.get("external_refresh_timeout_sec"), 45.0
+        )
         refresh_errors: List[Tuple[str, Exception]] = []
 
         # Try to refresh candidates unless dry-run.
         if not dry_run:
             try:
-                self._run_script("step1_screener.py", logs_dir / "step1.log")
+                self._run_script(
+                    "step1_screener.py",
+                    logs_dir / "step1.log",
+                    timeout_sec=external_refresh_timeout_sec,
+                )
             except Exception as e:
                 (logs_dir / "step1_error.txt").write_text(str(e), encoding="utf-8")
                 refresh_errors.append(("step1_screener.py", e))
-            try:
-                self._run_script("step2_financial_cleaner.py", logs_dir / "step2.log")
-            except Exception as e:
-                (logs_dir / "step2_error.txt").write_text(str(e), encoding="utf-8")
-                refresh_errors.append(("step2_financial_cleaner.py", e))
+            if refresh_errors and not allow_stale_candidate_fallback:
+                (logs_dir / "step2_skipped.txt").write_text(
+                    "step1 refresh failed and stale candidate fallback is disabled; "
+                    "skip step2 to avoid processing stale candidates.",
+                    encoding="utf-8",
+                )
+            else:
+                try:
+                    self._run_script(
+                        "step2_financial_cleaner.py",
+                        logs_dir / "step2.log",
+                        timeout_sec=external_refresh_timeout_sec,
+                    )
+                except Exception as e:
+                    (logs_dir / "step2_error.txt").write_text(str(e), encoding="utf-8")
+                    refresh_errors.append(("step2_financial_cleaner.py", e))
 
-        if refresh_errors and not allow_stale_candidate_fallback:
+        data_source_degraded = bool(refresh_errors and not allow_stale_candidate_fallback)
+        degraded_reasons: List[str] = []
+        if data_source_degraded:
             details = "; ".join(f"{name}: {err}" for name, err in refresh_errors)
-            raise RuntimeError(
-                "postclose candidate refresh failed; refusing to use stale candidates. "
-                "Set postclose.allow_stale_candidate_fallback=true to permit fallback. "
+            degraded_reasons.append(
+                "candidate refresh failed; using current-portfolio-only conservative review. "
                 f"{details}"
             )
 
-        if step1_path.exists():
+        if not data_source_degraded and step1_path.exists():
             copied_step1 = ctx.run_dir / "candidates_step1.csv"
             copied_step1.write_bytes(step1_path.read_bytes())
             artifacts.append(str(copied_step1))
-        if step2_path.exists():
+        if not data_source_degraded and step2_path.exists():
             copied_step2 = ctx.run_dir / "candidates_step2.csv"
             copied_step2.write_bytes(step2_path.read_bytes())
             artifacts.append(str(copied_step2))
 
-        candidate_df, source_level = self._load_candidate_df(step1_path, step2_path)
-        if candidate_df.empty:
+        positions = self._load_positions()
+        account = self._load_account()
+
+        if data_source_degraded:
+            source_level = "current_positions_only"
+            if positions.empty:
+                candidate_df = pd.DataFrame()
+            else:
+                candidate_df = pd.DataFrame(
+                    [
+                        {
+                            "ticker": normalize_ticker(row.get("ticker")),
+                            "名称": str(row.get("name", "N/A")),
+                            "行业": str(row.get("industry", "未知")),
+                            "现价": safe_float(row.get("last_price"), 0.0),
+                            "PE(TTM)": 99.0,
+                            "PB": 99.0,
+                            "股息率(%)": 0.0,
+                        }
+                        for _, row in positions.iterrows()
+                    ]
+                )
+        else:
+            candidate_df, source_level = self._load_candidate_df(step1_path, step2_path)
+
+        if candidate_df.empty and not data_source_degraded:
             raise RuntimeError("no candidate data available for postclose phase")
 
-        ticker_col = "股票代码" if "股票代码" in candidate_df.columns else "ticker"
         candidate_df = candidate_df.copy()
-        candidate_df["ticker_norm"] = candidate_df[ticker_col].apply(normalize_ticker)
-        if "名称" not in candidate_df.columns:
-            candidate_df["名称"] = "N/A"
+        if not candidate_df.empty:
+            ticker_col = "股票代码" if "股票代码" in candidate_df.columns else "ticker"
+            candidate_df["ticker_norm"] = candidate_df[ticker_col].apply(normalize_ticker)
+            if "名称" not in candidate_df.columns:
+                candidate_df["名称"] = "N/A"
+        else:
+            candidate_df["ticker_norm"] = pd.Series(dtype="object")
+            candidate_df["名称"] = pd.Series(dtype="object")
 
         top_n = int(self.config.get("postclose", {}).get("max_candidates_for_research", 8))
         candidate_df["__score"] = candidate_df.apply(score_candidate, axis=1)
@@ -1199,12 +1623,13 @@ class AgentSystem:
         research_rows: List[Dict[str, Any]] = []
         for _, row in top_df.iterrows():
             ticker = normalize_ticker(row["ticker_norm"])
-            tools = self._run_tools(ticker, dry_run=dry_run)
+            research_dry_run = dry_run or data_source_degraded
+            tools = self._run_tools(ticker, dry_run=research_dry_run)
             summary = self._derive_research_summary(
                 ticker,
                 tools,
                 name=str(row.get("名称", "N/A")),
-                dry_run=dry_run,
+                dry_run=research_dry_run,
             )
             summary["run_id"] = ctx.run_id
             summary["trading_date"] = ctx.trading_date
@@ -1217,11 +1642,20 @@ class AgentSystem:
         write_jsonl(research_path, research_rows)
         artifacts.append(str(research_path))
 
-        positions = self._load_positions()
-        account = self._load_account()
-        target_weights, feedback_context = self._build_target_weights(
+        target_weights, feedback_context, strategy_plan = self._build_parallel_target_weights(
             positions, candidate_df, research_rows, account
         )
+
+        strategy_plan_path = ctx.run_dir / "strategy_line_plan.json"
+        write_json(strategy_plan_path, strategy_plan)
+        artifacts.append(str(strategy_plan_path))
+
+        strategy_allocations_df = self._build_strategy_line_allocations(
+            strategy_plan, positions, candidate_df
+        )
+        strategy_allocations_path = ctx.run_dir / "strategy_line_allocations.csv"
+        strategy_allocations_df.to_csv(strategy_allocations_path, index=False, encoding="utf-8-sig")
+        artifacts.append(str(strategy_allocations_path))
 
         industry_map = self._industry_map(positions, candidate_df)
         violations = self._evaluate_constraints(target_weights, industry_map, account)
@@ -1264,6 +1698,8 @@ class AgentSystem:
 
         gate_failures: List[str] = []
         gate_warnings: List[str] = []
+        if data_source_degraded:
+            gate_warnings.append("data_source_degraded")
         if hard_risk_block and positive_delta > 0:
             gate_failures.append("hard_risk_block_new_buy")
         if evidence_completeness < min_evidence:
@@ -1316,6 +1752,8 @@ class AgentSystem:
                 for t, w in sorted(target_weights.items())
             ],
             "target_weights": {t: round(w, 4) for t, w in target_weights.items()},
+            "strategy_mode": strategy_plan.get("mode", "legacy_single_line"),
+            "strategy_lines": strategy_plan,
             "turnover_est": round(float(turnover), 6),
             "transaction_cost_est": round(float(transaction_cost_est), 4),
             "risk_delta": {
@@ -1327,6 +1765,8 @@ class AgentSystem:
             "constraint_violations": violations,
             "gate_failures": gate_failures,
             "gate_warnings": gate_warnings,
+            "data_source_degraded": data_source_degraded,
+            "degraded_reasons": degraded_reasons,
             "feedback_context": feedback_context,
             "abstain_context": abstain_context,
             "decision": decision,

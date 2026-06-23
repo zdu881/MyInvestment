@@ -10,6 +10,7 @@
 ## 1. 核心能力
 
 - 多阶段运行：`preopen` / `intraday` / `postclose` / `all`
+- 双线并行：收盘阶段同时生成价投核心仓与短线卫星仓计划，并合并为统一执行目标
 - 人工审核闭环：`approve` / `hold` / `reject`
 - 组合级结论显式支持 `stay_in_cash` / `hold` / `watch` / `rebalance`
 - 执行闭环：支持 `dry-run` 与 `force`，执行后状态与产物回写
@@ -166,7 +167,13 @@ python3 agent_system.py --phase postclose
 python3 agent_system.py --phase all
 ```
 
-非 dry-run 的 `postclose` 默认要求 `step1_screener.py` 和 `step2_financial_cleaner.py` 刷新成功；失败时不会自动复用旧候选池。只有明确设置 `postclose.allow_stale_candidate_fallback=true` 时才允许旧候选池兜底。
+非 dry-run 的 `postclose` 会先刷新 `step1_screener.py` 和 `step2_financial_cleaner.py`，每个外部刷新脚本默认最多等待 `postclose.external_refresh_timeout_sec` 秒。若外部数据源失败或超时，系统不会复用旧候选池，而是降级为 `current_positions_only`：仅基于当前持仓、现金比例和组合约束生成保守观察/减仓建议。只有明确设置 `postclose.allow_stale_candidate_fallback=true` 时才允许旧候选池兜底。
+
+收盘提案默认启用 `strategy_lines.enabled=true` 的双线模式：
+- `value`：价投核心仓，预算较高，可在无新增买点时保守保留现有核心持仓。
+- `short`：短线卫星仓，预算和单票上限更低，默认避开价投线已选标的。
+
+双线明细写入每次 run 的 `strategy_line_plan.json` 和 `strategy_line_allocations.csv`；原有 `allocation_proposal.json.target_weights` 仍是合并后的唯一执行目标，人工审核与执行命令保持兼容。
 
 ### 5.3 审核与执行
 

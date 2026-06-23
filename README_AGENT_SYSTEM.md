@@ -150,8 +150,13 @@ This document describes the first build milestone of the daily investment agent 
 
 - In `--dry-run` mode, external tools are not required.
 - In non-dry mode, `postclose` attempts to run `step1_screener.py` and `step2_financial_cleaner.py`.
-- If those scripts fail, `postclose` fails by default rather than using stale candidate CSV files.
+- External refresh scripts are bounded by `postclose.external_refresh_timeout_sec`.
+- If those scripts fail, `postclose` degrades to a `current_positions_only` conservative review rather than using stale candidate CSV files.
 - Set `postclose.allow_stale_candidate_fallback=true` only when you intentionally want the older fallback behavior.
+- Postclose uses `strategy_lines.enabled=true` by default:
+  - `value` is the core value-investing line with larger budget and optional existing-position fallback.
+  - `short` is the short-term satellite line with smaller budget, lower single-name cap, and default exclusion of tickers already selected by `value`.
+  - The run writes `strategy_line_plan.json` and `strategy_line_allocations.csv`; `allocation_proposal.json.target_weights` remains the merged execution target.
 - `agent_execute.py` writes state mutations only when not using `--dry-run`.
 - Non-dry execution requires `--confirm-manual-fill` by default, after broker-side manual orders are confirmed filled.
 - Execution cost model is configurable in `agent_config.json`:

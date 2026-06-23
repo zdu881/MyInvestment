@@ -24,6 +24,7 @@ Step 1: 环境配置与数据获取 (MVP)
 import re
 import os
 import time
+from pathlib import Path
 from datetime import date, timedelta
 import traceback
 from typing import Optional, List
@@ -654,7 +655,14 @@ def run_lixinger_pipeline() -> pd.DataFrame:
         bs.logout()
 
 
-def main():
+def write_csv_atomic(df: pd.DataFrame, output_path: str) -> None:
+    path = Path(output_path)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    df.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+    os.replace(tmp_path, path)
+
+
+def main() -> int:
     """
     主流程：拉取数据 -> 标准化 -> 第一轮过滤 -> 补股息率 -> 最终过滤 -> 导出 CSV
     """
@@ -715,8 +723,9 @@ def main():
 
         # 导出 CSV，使用 utf-8-sig 兼容 Excel 中文显示
         output_path = "candidates.csv"
-        output_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+        write_csv_atomic(output_df, output_path)
         print(f"[SUCCESS] 已输出候选列表：{output_path}")
+        return 0
 
     except Exception as e:
         # 捕获主流程异常，避免程序“硬崩”
@@ -736,8 +745,9 @@ def main():
         print("   export LIXINGER_TOKEN='你的token' && python3 step1_screener.py")
         print("6) 若要调节 Lixinger 限流与重试（示例）：")
         print("   LIXINGER_MAX_RPM=600 LIXINGER_MAX_RETRY=5 LIXINGER_TIMEOUT_SECONDS=20 python3 step1_screener.py")
+        return 1
 
 
 # Python 脚本入口
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

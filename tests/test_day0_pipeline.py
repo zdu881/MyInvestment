@@ -160,9 +160,13 @@ def test_day0_empty_account_stays_in_cash_without_high_conviction_buy(tmp_path: 
 
     proposal = _read_json(run_dir / "allocation_proposal.json")
     assert proposal["decision"] == "stay_in_cash"
+    assert proposal["strategy_mode"] == "parallel_lines"
+    assert proposal["strategy_lines"]["enabled"] is True
     assert proposal.get("feedback_context", {}).get("selected_count") == 0
     assert "evidence_below_threshold" in proposal.get("gate_failures", [])
     assert proposal.get("abstain_context", {}).get("baseline") == "cash"
+    assert (run_dir / "strategy_line_plan.json").exists()
+    assert (run_dir / "strategy_line_allocations.csv").exists()
 
     rebalance_rows = _read_csv(run_dir / "rebalance_actions.csv")
     actionable = [row for row in rebalance_rows if str(row.get("action", "")) != "HOLD"]
@@ -230,7 +234,7 @@ def test_agent_execute_blocks_non_dry_run_in_manual_only_mode(tmp_path: Path) ->
     assert "manual_only" in message
 
 
-def test_postclose_refuses_stale_candidates_when_refresh_fails(tmp_path: Path) -> None:
+def test_postclose_degrades_to_current_positions_when_refresh_fails(tmp_path: Path) -> None:
     config_path = tmp_path / "agent_config.json"
     _write_json(
         config_path,
@@ -246,8 +250,54 @@ def test_postclose_refuses_stale_candidates_when_refresh_fails(tmp_path: Path) -
             "postclose": {
                 "max_candidates_for_research": 2,
                 "allow_stale_candidate_fallback": "false",
+                "external_refresh_timeout_sec": 1,
+            },
+            "constraints": {
+                "max_single_weight": 0.3,
+                "max_industry_weight": 0.5,
+                "min_cash_ratio": 0.1,
             },
         },
+    )
+    _write_json(
+        tmp_path / "state" / "account_snapshot.json",
+        {
+            "cash": 5000.0,
+            "total_asset": 25000.0,
+            "stock_asset": 20000.0,
+            "cash_ratio": 0.2,
+            "max_single_weight": 0.3,
+            "max_industry_weight": 0.5,
+            "min_cash_ratio": 0.1,
+        },
+    )
+    _write_csv(
+        tmp_path / "state" / "current_positions.csv",
+        fieldnames=["ticker", "name", "shares", "avg_cost", "last_price", "market_value", "weight", "industry", "updated_at"],
+        rows=[
+            {
+                "ticker": "600941",
+                "name": "中国移动",
+                "shares": "100",
+                "avg_cost": "93.94",
+                "last_price": "91.65",
+                "market_value": "9165.00",
+                "weight": "0.3837",
+                "industry": "通信",
+                "updated_at": "2026-06-18T15:00:00+08:00",
+            },
+            {
+                "ticker": "601816",
+                "name": "京沪高铁",
+                "shares": "2100",
+                "avg_cost": "4.952",
+                "last_price": "4.59",
+                "market_value": "9639.00",
+                "weight": "0.4036",
+                "industry": "交通运输",
+                "updated_at": "2026-06-18T15:00:00+08:00",
+            },
+        ],
     )
     _write_csv(
         tmp_path / "candidates_step2.csv",
@@ -286,15 +336,26 @@ def test_postclose_refuses_stale_candidates_when_refresh_fails(tmp_path: Path) -
         capture_output=True,
     )
 
-    assert proc.returncode != 0
+    assert proc.returncode == 0, proc.stdout + proc.stderr
     output = (proc.stdout or "") + (proc.stderr or "")
-    assert "status=failed" in output
+    assert "status=success" in output
 
     manifests = list((tmp_path / "runs").glob("*/*/run_manifest.json"))
     assert len(manifests) == 1
     manifest = _read_json(manifests[0])
-    assert manifest["status"] == "failed"
-    assert "refusing to use stale candidates" in manifest["error_summary"]
-    assert "step1_screener.py" in manifest["error_summary"]
-    assert "step2_financial_cleaner.py" in manifest["error_summary"]
-    assert _read_jsonl(tmp_path / "state" / "review_queue.jsonl") == []
+    assert manifest["status"] == "success"
+    assert manifest["error_summary"] == ""
+    assert not any(path.endswith("candidates_step2.csv") for path in manifest["artifacts"])
+
+    run_dir = manifests[0].parent
+    proposal = _read_json(run_dir / "allocation_proposal.json")
+    assert proposal["decision"] == "watch"
+    assert proposal["data_source_degraded"] is True
+    assert proposal["strategy_mode"] == "parallel_lines"
+    assert proposal["strategy_lines"]["lines"]["value"]["allow_existing_fallback"] is True
+    assert "data_source_degraded" in proposal["gate_warnings"]
+    assert proposal["target_weights"] == {"600941": 0.3, "601816": 0.3}
+
+    actions = _read_csv(run_dir / "rebalance_actions.csv")
+    assert [row["action"] for row in actions] == ["DECREASE", "DECREASE"]
+    assert _read_jsonl(tmp_path / "state" / "review_queue.jsonl")[0]["run_id"] == proposal["run_id"]
