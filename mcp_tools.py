@@ -308,10 +308,9 @@ def _lookup_a_share_name(ticker: str) -> Optional[str]:
 def search_market_sentiment(ticker: str) -> Dict[str, Any]:
     """检索公开新闻 RSS，输出标准化负面事件与风险摘要。"""
     symbol = normalize_ticker(ticker)
-    company_name = _lookup_a_share_name(symbol)
 
     try:
-        intelligence = build_market_intelligence_report(symbol, company_name=company_name)
+        intelligence = build_market_intelligence_report(symbol)
     except MarketIntelligenceError as exc:
         return ToolResult(
             ok=False,

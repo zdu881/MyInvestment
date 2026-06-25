@@ -18,10 +18,16 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+try:
+    import akshare as ak
+except Exception:  # pragma: no cover - optional runtime dependency guard
+    ak = None
+
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 DEFAULT_LOOKBACK_DAYS = 120
 DEFAULT_TIMEOUT_SECONDS = 6.0
 DEFAULT_MAX_EVENTS = 6
+MAX_GOOGLE_QUERY_FAILURES_BEFORE_FALLBACK = 1
 REQUEST_HEADERS = {
     "User-Agent": "MyInvestment/1.0 (+https://github.com/openai/codex-cli)",
 }
@@ -185,6 +191,35 @@ def parse_google_news_rss(xml_text: str, query: str) -> List[Dict[str, Any]]:
     return events
 
 
+def fetch_eastmoney_stock_news(ticker: str, company_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Fetch Eastmoney per-stock news through AkShare as a China-accessible fallback."""
+    if ak is None or not hasattr(ak, "stock_news_em"):
+        raise MarketIntelligenceError("东方财富个股新闻接口不可用")
+
+    df = ak.stock_news_em(symbol=ticker)
+    if df is None:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for _, row in df.iterrows():
+        title = str(row.get("新闻标题", row.get("title", ""))).strip()
+        if not title:
+            continue
+        source = str(row.get("文章来源", row.get("source", ""))).strip() or "东方财富"
+        published_at = _parse_news_datetime(str(row.get("发布时间", "")))
+        rows.append(
+            {
+                "published_at": published_at,
+                "title": title,
+                "description": str(row.get("新闻内容", row.get("description", ""))).strip(),
+                "link": str(row.get("新闻链接", row.get("link", ""))).strip(),
+                "source": source,
+                "query": f"{ticker} {company_name or ''}".strip(),
+            }
+        )
+    return rows
+
+
 def build_market_intelligence_report(
     ticker: str,
     *,
@@ -198,17 +233,31 @@ def build_market_intelligence_report(
     raw_events: List[Dict[str, Any]] = []
     errors: List[str] = []
     successful_queries = 0
+    successful_sources: List[str] = []
 
-    for query in queries:
-        try:
-            xml_text = fetch_google_news_rss(query, session=session)
-        except Exception as exc:
-            errors.append(f"{query}: {exc}")
-            continue
-        successful_queries += 1
-        raw_events.extend(parse_google_news_rss(xml_text, query))
+    try:
+        raw_events.extend(fetch_eastmoney_stock_news(ticker, company_name=company_name))
+        successful_sources.append("eastmoney_stock_news")
+    except Exception as exc:
+        errors.append(f"eastmoney_stock_news:{ticker}: {exc}")
 
-    if successful_queries == 0:
+    if not successful_sources:
+        google_errors_before = len(errors)
+        for query in queries:
+            try:
+                xml_text = fetch_google_news_rss(query, session=session)
+            except Exception as exc:
+                errors.append(f"{query}: {exc}")
+                if successful_queries == 0 and len(errors) - google_errors_before >= MAX_GOOGLE_QUERY_FAILURES_BEFORE_FALLBACK:
+                    break
+                continue
+            successful_queries += 1
+            raw_events.extend(parse_google_news_rss(xml_text, query))
+
+        if successful_queries > 0:
+            successful_sources.append("google_news")
+
+    if not successful_sources:
         raise MarketIntelligenceError("公开新闻源检索失败，无法生成舆情结论")
 
     normalized_events = _normalize_negative_events(
@@ -230,6 +279,9 @@ def build_market_intelligence_report(
         "risk_score": risk_score,
         "negative_events": [event.to_dict() for event in selected_events],
         "conclusion": _build_conclusion(selected_events, categories, risk_score),
+        "source_success_count": len(successful_sources),
+        "successful_sources": successful_sources,
+        "raw_event_count": len(raw_events),
     }
     if errors:
         data["partial_errors"] = errors[:3]
@@ -268,6 +320,24 @@ def _parse_pub_date(value: str) -> Optional[str]:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).isoformat()
     except Exception:
+        return None
+
+
+def _parse_news_datetime(value: str) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except ValueError:
         return None
 
 

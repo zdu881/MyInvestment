@@ -45,6 +45,11 @@ def test_build_market_intelligence_report_deduplicates_and_scores(monkeypatch) -
             return fixed if tz is None else fixed.astimezone(tz)
 
     monkeypatch.setattr(market_intelligence, "fetch_google_news_rss", lambda *args, **kwargs: RSS_SAMPLE)
+    monkeypatch.setattr(
+        market_intelligence,
+        "fetch_eastmoney_stock_news",
+        lambda *args, **kwargs: (_ for _ in ()).throw(market_intelligence.MarketIntelligenceError("eastmoney unavailable")),
+    )
     monkeypatch.setattr(market_intelligence, "datetime", FixedDatetime)
 
     report = market_intelligence.build_market_intelligence_report(
@@ -60,6 +65,49 @@ def test_build_market_intelligence_report_deduplicates_and_scores(monkeypatch) -
     assert report["risk_score"] >= 30
     assert "监管" in report["conclusion"]
     assert all(event["headline"] for event in events)
+
+
+def test_build_market_intelligence_report_uses_eastmoney_before_google(monkeypatch) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 6, 25, 12, 0, tzinfo=timezone.utc)
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    google_calls: list[str] = []
+
+    def google_timeout(query, *args, **kwargs):
+        google_calls.append(str(query))
+        raise AssertionError("google should not be called when eastmoney succeeds")
+
+    def eastmoney_news(*args, **kwargs):
+        return [
+            {
+                "published_at": "2026-06-24T09:00:00+00:00",
+                "title": "中国建筑下属子公司拟参与新加坡房地产开发项目",
+                "description": "公司公告披露项目投资计划。",
+                "link": "https://example.com/neutral",
+                "source": "财联社",
+                "query": "601668 中国建筑",
+            }
+        ]
+
+    monkeypatch.setattr(market_intelligence, "fetch_google_news_rss", google_timeout)
+    monkeypatch.setattr(market_intelligence, "fetch_eastmoney_stock_news", eastmoney_news)
+    monkeypatch.setattr(market_intelligence, "datetime", FixedDatetime)
+
+    report = market_intelligence.build_market_intelligence_report(
+        "601668",
+        company_name="中国建筑",
+        lookback_days=120,
+    )
+
+    assert report["successful_sources"] == ["eastmoney_stock_news"]
+    assert report["risk_score"] == 0.0
+    assert report["negative_events"] == []
+    assert "未检索到明确负面舆情" in report["conclusion"]
+    assert "partial_errors" not in report
+    assert len(google_calls) == 0
 
 
 def test_search_market_sentiment_returns_failure_when_sources_unavailable(monkeypatch) -> None:
