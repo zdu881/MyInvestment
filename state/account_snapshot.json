@@ -1,8 +1,8 @@
 {
-  "cash": 5080.05,
-  "total_asset": 23884.05,
-  "stock_asset": 18804,
-  "cash_ratio": 0.212696,
+  "cash": 14114.05,
+  "total_asset": 23753.05,
+  "stock_asset": 9639.0,
+  "cash_ratio": 0.594199,
   "max_single_weight": 0.3,
   "max_industry_weight": 0.5,
   "min_cash_ratio": 0.1,
