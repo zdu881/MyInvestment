@@ -78,6 +78,9 @@ LIXINGER_TIMEOUT_SECONDS = int(os.getenv("LIXINGER_TIMEOUT_SECONDS", "15"))
 LIXINGER_MAX_RETRY = int(os.getenv("LIXINGER_MAX_RETRY", str(MAX_RETRY)))
 LIXINGER_RETRY_SLEEP_SECONDS = float(os.getenv("LIXINGER_RETRY_SLEEP_SECONDS", str(RETRY_SLEEP_SECONDS)))
 LIXINGER_MAX_RPM = int(os.getenv("LIXINGER_MAX_RPM", "900"))
+# 新主数据源：新浪实时行情 + 东方财富分红 + 东方财富单票估值
+SINA_BAIDU_MAX_VALUATION_REQUESTS = int(os.getenv("SINA_BAIDU_MAX_VALUATION_REQUESTS", "35"))
+SINA_BAIDU_DIVIDEND_REPORT_YEARS = int(os.getenv("SINA_BAIDU_DIVIDEND_REPORT_YEARS", "2"))
 
 
 # =============================
@@ -130,6 +133,16 @@ def is_valid_a_share_code(code_with_prefix: str) -> bool:
 
     six = code_with_prefix.split(".")[-1]
     return six.startswith(("60", "68", "00", "30"))
+
+
+def normalize_plain_ticker(value) -> str:
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return digits.zfill(6)[-6:] if digits else ""
+
+
+def is_valid_plain_a_share_ticker(ticker: str) -> bool:
+    ticker = normalize_plain_ticker(ticker)
+    return bool(ticker) and ticker.startswith(("60", "68", "00", "30"))
 
 
 def fetch_a_share_spot_with_retry() -> pd.DataFrame:
@@ -330,6 +343,176 @@ def add_dividend_yield_and_filter(df: pd.DataFrame) -> pd.DataFrame:
 
     # 按股息率从高到低排序
     out = out.sort_values(by=["dividend_yield", "pe_ttm"], ascending=[False, True]).reset_index(drop=True)
+    return out
+
+
+def fetch_sina_a_share_spot_with_retry() -> pd.DataFrame:
+    """使用新浪全市场实时行情接口，当前环境下比 Eastmoney spot 更稳定。"""
+    last_error = None
+    for i in range(1, MAX_RETRY + 1):
+        try:
+            print(f"[INFO] [Sina] 正在拉取 A 股实时行情，第 {i}/{MAX_RETRY} 次尝试...")
+            df = ak.stock_zh_a_spot()
+            if df is None or df.empty:
+                raise ValueError("返回数据为空")
+            print(f"[INFO] [Sina] 实时行情拉取成功，共 {len(df)} 条")
+            return df
+        except Exception as e:
+            last_error = e
+            print(f"[WARN] [Sina] 拉取失败：{e}")
+            if i < MAX_RETRY:
+                time.sleep(RETRY_SLEEP_SECONDS)
+    raise RuntimeError(f"Sina A 股实时行情拉取失败（已重试 {MAX_RETRY} 次）：{last_error}")
+
+
+def normalize_sina_spot_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
+    code_col = find_first_existing_column(raw_df, ["代码", "symbol", "股票代码"])
+    name_col = find_first_existing_column(raw_df, ["名称", "name", "股票名称"])
+    price_col = find_first_existing_column(raw_df, ["最新价", "现价", "close", "最新"])
+    if code_col is None or name_col is None or price_col is None:
+        raise KeyError(f"Sina 行情缺少关键列。当前列名：{list(raw_df.columns)}")
+
+    out = pd.DataFrame()
+    out["ticker"] = raw_df[code_col].apply(normalize_plain_ticker)
+    out["name"] = raw_df[name_col].astype(str)
+    out["current_price"] = raw_df[price_col].apply(safe_to_float)
+    out = out[out["ticker"].apply(is_valid_plain_a_share_ticker)].copy()
+    out = out.dropna(subset=["current_price"])
+    out = out[out["current_price"] > 0].copy()
+    out["lot_cost"] = out["current_price"] * 100
+    out = out.drop_duplicates(subset=["ticker"]).reset_index(drop=True)
+    return out
+
+
+def dividend_report_periods(today: Optional[date] = None) -> List[str]:
+    today = today or date.today()
+    start_year = today.year - 1
+    return [f"{year}1231" for year in range(start_year, start_year - SINA_BAIDU_DIVIDEND_REPORT_YEARS, -1)]
+
+
+def fetch_dividend_yield_table(periods: Optional[List[str]] = None) -> pd.DataFrame:
+    frames = []
+    for period in periods or dividend_report_periods():
+        try:
+            print(f"[INFO] [Dividend] 正在拉取分红送配报告期：{period}")
+            df = ak.stock_fhps_em(date=period)
+            if df is None or df.empty:
+                continue
+            temp = df.copy()
+            temp["ticker"] = temp["代码"].apply(normalize_plain_ticker)
+            temp["dividend_yield"] = temp["现金分红-股息率"].apply(safe_to_float)
+            # AkShare 当前返回小数口径，例如 0.058 表示 5.8%。
+            temp.loc[temp["dividend_yield"].notna() & (temp["dividend_yield"] <= 1), "dividend_yield"] *= 100
+            temp["dividend_report_period"] = period
+            if "最新公告日期" in temp.columns:
+                temp["__announcement_date"] = pd.to_datetime(temp["最新公告日期"], errors="coerce")
+            else:
+                temp["__announcement_date"] = pd.NaT
+            frames.append(temp[["ticker", "dividend_yield", "dividend_report_period", "__announcement_date"]])
+        except Exception as e:
+            print(f"[WARN] [Dividend] 报告期 {period} 拉取失败：{e}")
+
+    if not frames:
+        return pd.DataFrame(columns=["ticker", "dividend_yield", "dividend_report_period"])
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out[out["ticker"].apply(is_valid_plain_a_share_ticker)].copy()
+    out = out.dropna(subset=["dividend_yield"])
+    out = out.sort_values(
+        by=["ticker", "__announcement_date", "dividend_report_period"],
+        ascending=[True, False, False],
+    )
+    out = out.drop_duplicates(subset=["ticker"], keep="first")
+    return out[["ticker", "dividend_yield", "dividend_report_period"]].reset_index(drop=True)
+
+
+def fetch_valuation_snapshot_em(ticker: str) -> Optional[dict]:
+    try:
+        df = ak.stock_value_em(symbol=normalize_plain_ticker(ticker))
+        if df is None or df.empty:
+            return None
+        row = df.iloc[-1]
+        return {
+            "total_mv": safe_to_float(row.get("总市值")),
+            "pe_ttm": safe_to_float(row.get("PE(TTM)")),
+            "pb": safe_to_float(row.get("市净率")),
+            "valuation_date": str(row.get("数据日期", "")),
+        }
+    except Exception as e:
+        print(f"[WARN] [Valuation] {ticker} 估值拉取失败：{e}")
+        return None
+
+
+def run_sina_baidu_pipeline() -> pd.DataFrame:
+    """
+    新主数据源：
+    - 新浪全市场实时行情负责 ticker/name/current_price
+    - 东方财富分红送配负责最近股息率
+    - 东方财富单票估值负责总市值、PE(TTM)、PB
+    """
+    spot_raw = fetch_sina_a_share_spot_with_retry()
+    spot = normalize_sina_spot_dataframe(spot_raw)
+    print(f"[INFO] [Sina+Baidu] 标准化行情记录数：{len(spot)}")
+
+    dividend_df = fetch_dividend_yield_table()
+    if dividend_df.empty:
+        raise RuntimeError("分红送配数据为空，无法构建新主数据源候选池")
+
+    base = spot.merge(dividend_df, on="ticker", how="left")
+    base = base[base["lot_cost"] <= LOT_COST_THRESHOLD].copy()
+    base = base.dropna(subset=["dividend_yield"])
+    base = base[base["dividend_yield"] > 0].copy()
+    if base.empty:
+        raise RuntimeError("Sina+Baidu 预筛后候选为空")
+
+    base = base.sort_values(by=["dividend_yield", "lot_cost"], ascending=[False, True]).reset_index(drop=True)
+    valuation_limit = max(1, SINA_BAIDU_MAX_VALUATION_REQUESTS)
+    preselected = base.head(valuation_limit).copy()
+    print(
+        f"[INFO] [Sina+Baidu] 预筛候选 {len(base)} 条，"
+        f"本轮估值增强前 {len(preselected)} 条"
+    )
+
+    rows = []
+    for idx, row in preselected.iterrows():
+        ticker = row["ticker"]
+        if (idx + 1) % 10 == 0 or idx == 0 or idx + 1 == len(preselected):
+            print(f"[INFO] [Sina+Baidu] 正在补充估值：{idx + 1}/{len(preselected)} - {ticker}")
+        valuation = fetch_valuation_snapshot_em(ticker)
+        if not valuation:
+            continue
+        new_row = row.to_dict()
+        new_row.update(valuation)
+        rows.append(new_row)
+        time.sleep(0.05)
+
+    enriched = pd.DataFrame(rows)
+    if enriched.empty:
+        raise RuntimeError("Sina+Baidu 估值增强后候选为空")
+
+    enriched["rule_market_cap"] = enriched["total_mv"] > MARKET_CAP_THRESHOLD
+    enriched["rule_pe"] = (enriched["pe_ttm"] > 0) & (enriched["pe_ttm"] < PE_THRESHOLD)
+    enriched["rule_pb"] = (enriched["pb"] > 0) & (enriched["pb"] < PB_THRESHOLD)
+    enriched["rule_lot_cost"] = enriched["lot_cost"] <= LOT_COST_THRESHOLD
+    enriched["rule_dividend"] = enriched["dividend_yield"] > DIVIDEND_YIELD_THRESHOLD
+    enriched["pass_count_final"] = enriched[[
+        "rule_market_cap", "rule_pe", "rule_pb", "rule_lot_cost", "rule_dividend"
+    ]].sum(axis=1)
+
+    if STRICT_MODE:
+        out = enriched[enriched["pass_count_final"] == 5].copy()
+    else:
+        out = enriched[enriched["pass_count_final"] >= MIN_PASS_COUNT_FINAL].copy()
+
+    if out.empty:
+        raise RuntimeError("Sina+Baidu 最终候选为空")
+
+    out["data_source"] = "sina_baidu"
+    out = out.sort_values(
+        by=["pass_count_final", "dividend_yield", "pe_ttm"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    print(f"[INFO] [Sina+Baidu] 最终候选记录数：{len(out)}")
     return out
 
 
@@ -667,16 +850,20 @@ def main() -> int:
     主流程：拉取数据 -> 标准化 -> 第一轮过滤 -> 补股息率 -> 最终过滤 -> 导出 CSV
     """
     try:
-        # 1) 先走 AkShare 主流程，失败后自动切换 Lixinger，再兜底 Baostock
+        # 1) 先走当前可用的新主数据源，失败后自动切换旧链路
         try:
-            final_df = run_akshare_pipeline()
-        except Exception as ak_error:
-            print(f"[WARN] AkShare 主流程失败，准备切换 Lixinger：{ak_error}")
+            final_df = run_sina_baidu_pipeline()
+        except Exception as primary_error:
+            print(f"[WARN] Sina+Baidu 主流程失败，准备切换 AkShare 旧链路：{primary_error}")
             try:
-                final_df = run_lixinger_pipeline()
-            except Exception as lix_error:
-                print(f"[WARN] Lixinger 失败，准备切换 Baostock 兜底：{lix_error}")
-                final_df = run_baostock_fallback_pipeline()
+                final_df = run_akshare_pipeline()
+            except Exception as ak_error:
+                print(f"[WARN] AkShare 旧链路失败，准备切换 Lixinger：{ak_error}")
+                try:
+                    final_df = run_lixinger_pipeline()
+                except Exception as lix_error:
+                    print(f"[WARN] Lixinger 失败，准备切换 Baostock 兜底：{lix_error}")
+                    final_df = run_baostock_fallback_pipeline()
 
         # 5) 输出列（按你的要求）
         output_cols = [
@@ -741,9 +928,12 @@ def main() -> int:
         print("   python -c \"import akshare as ak; print(hasattr(ak, 'stock_zh_a_spot_em')); print(hasattr(ak, 'stock_a_lg_indicator')); print(hasattr(ak, 'stock_a_indicator_lg'))\"")
         print("4) 查看返回字段：")
         print("   python -c \"import akshare as ak; df=ak.stock_zh_a_spot_em(); print(df.columns.tolist())\"")
-        print("5) 若要启用 Lixinger：")
+        print("5) 当前主数据源为 Sina+Baidu：stock_zh_a_spot + stock_fhps_em + stock_value_em")
+        print("6) 若要调节新主数据源估值增强数量（示例）：")
+        print("   SINA_BAIDU_MAX_VALUATION_REQUESTS=50 python3 step1_screener.py")
+        print("7) 若要启用 Lixinger：")
         print("   export LIXINGER_TOKEN='你的token' && python3 step1_screener.py")
-        print("6) 若要调节 Lixinger 限流与重试（示例）：")
+        print("8) 若要调节 Lixinger 限流与重试（示例）：")
         print("   LIXINGER_MAX_RPM=600 LIXINGER_MAX_RETRY=5 LIXINGER_TIMEOUT_SECONDS=20 python3 step1_screener.py")
         return 1
 
