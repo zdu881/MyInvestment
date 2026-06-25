@@ -85,12 +85,12 @@ MAX_RETRY = env_int("STEP2_MAX_RETRY", 3)
 RETRY_SLEEP_SECONDS = env_float("STEP2_RETRY_SLEEP_SECONDS", 1.2)
 # 每只股票请求之间的休眠，减少限流概率
 PER_TICKER_SLEEP_SECONDS = env_float("STEP2_PER_TICKER_SLEEP_SECONDS", 0.08)
-# 单个 AkShare 调用超时（秒）
-AK_CALL_TIMEOUT_SECONDS = env_float("STEP2_AK_CALL_TIMEOUT_SECONDS", 8.0)
+# 单个 AkShare 调用超时（秒）。东方财富现金流量表实测通常 7-12 秒返回。
+AK_CALL_TIMEOUT_SECONDS = env_float("STEP2_AK_CALL_TIMEOUT_SECONDS", 18.0)
 # 单个 Baostock 调用超时（秒）
 BAOSTOCK_CALL_TIMEOUT_SECONDS = env_float("STEP2_BAOSTOCK_CALL_TIMEOUT_SECONDS", 8.0)
 # 单只股票完整财务计算超时（秒）
-PER_TICKER_TIMEOUT_SECONDS = env_float("STEP2_PER_TICKER_TIMEOUT_SECONDS", 15.0)
+PER_TICKER_TIMEOUT_SECONDS = env_float("STEP2_PER_TICKER_TIMEOUT_SECONDS", 25.0)
 # 行业映射加载超时（秒）
 INDUSTRY_MAP_TIMEOUT_SECONDS = env_float("STEP2_INDUSTRY_MAP_TIMEOUT_SECONDS", 8.0)
 
@@ -243,6 +243,28 @@ def find_first_existing_column(df: pd.DataFrame, candidates: List[str]) -> Optio
     return None
 
 
+def prefer_latest_annual_report(df: pd.DataFrame) -> pd.DataFrame:
+    """现金流质量校验优先使用年报，避免单季现金流季节性误杀。"""
+    if df is None or df.empty:
+        return df
+    report_col = find_first_existing_column(df, ["REPORT_DATE", "报告日期", "报告期", "日期"])
+    if report_col is None:
+        return df
+    data = df.copy()
+    data["__report_date_tmp"] = pd.to_datetime(data[report_col], errors="coerce")
+    annual = data[data["__report_date_tmp"].dt.strftime("%m-%d") == "12-31"].copy()
+    if not annual.empty:
+        return annual.drop(columns=["__report_date_tmp"], errors="ignore")
+
+    report_type_col = find_first_existing_column(data, ["REPORT_TYPE", "报告类型"])
+    if report_type_col is not None:
+        annual = data[data[report_type_col].astype(str).str.contains("年报", na=False)].copy()
+        if not annual.empty:
+            return annual.drop(columns=["__report_date_tmp"], errors="ignore")
+
+    return data.drop(columns=["__report_date_tmp"], errors="ignore")
+
+
 def normalize_ticker(value: str) -> str:
     """
     规范化股票代码：确保是 6 位字符串（A 股常见格式）。
@@ -252,6 +274,14 @@ def normalize_ticker(value: str) -> str:
     digits = "".join(ch for ch in text if ch.isdigit())
     # 左侧补零到 6 位
     return digits.zfill(6)[-6:]
+
+
+def to_eastmoney_symbol(value: str) -> str:
+    """AkShare 东方财富财报接口要求 SH/SZ 前缀。"""
+    ticker = normalize_ticker(value)
+    if ticker.startswith(("6", "9")):
+        return f"SH{ticker}"
+    return f"SZ{ticker}"
 
 
 def _load_industry_map_from_baostock_unchecked() -> Dict[str, str]:
@@ -355,6 +385,54 @@ def _call_ak_function_with_retry(func_name: str, symbol: str) -> Optional[pd.Dat
     return None
 
 
+def fetch_by_eastmoney_cashflow(symbol: str) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
+    """
+    使用东方财富现金流量表单表获取 OCF 与净利润。
+
+    AkShare 的 stock_cash_flow_sheet_by_report_em 要求传入 SH/SZ 前缀；
+    返回表中同时包含 NETCASH_OPERATE 与 NETPROFIT，因此不需要再拉利润表。
+    """
+    if not hasattr(ak, "stock_cash_flow_sheet_by_report_em"):
+        return None, None, None, "eastmoney_cashflow_unavailable"
+
+    em_symbol = to_eastmoney_symbol(symbol)
+    try:
+        df = run_with_timeout(
+            lambda: ak.stock_cash_flow_sheet_by_report_em(symbol=em_symbol),
+            AK_CALL_TIMEOUT_SECONDS,
+            f"akshare stock_cash_flow_sheet_by_report_em({em_symbol})",
+        )
+    except ExternalCallTimeout:
+        return None, None, None, "eastmoney_cashflow_timeout"
+    except Exception:
+        return None, None, None, "eastmoney_cashflow_error"
+
+    if df is None or df.empty:
+        return None, None, None, "eastmoney_cashflow_empty"
+
+    df = prefer_latest_annual_report(df)
+    ocf, report_cf = extract_latest_value(
+        df,
+        [
+            "NETCASH_OPERATE",
+            "经营活动产生的现金流量净额",
+            "经营活动现金流量净额",
+            "经营现金流量净额",
+        ],
+    )
+    net_income, report_pf = extract_latest_value(
+        df,
+        [
+            "NETPROFIT",
+            "净利润",
+            "净利润（含少数股东损益）",
+            "净利润(含少数股东损益)",
+        ],
+    )
+    report_period = report_cf if report_cf is not None else report_pf
+    return ocf, net_income, report_period, "eastmoney_cashflow"
+
+
 def fetch_cashflow_and_profit(symbol: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], str, str]:
     """
     获取某只股票的现金流量表和利润表。
@@ -368,13 +446,14 @@ def fetch_cashflow_and_profit(symbol: str) -> Tuple[Optional[pd.DataFrame], Opti
     - profit_api_used: 实际命中的利润表接口名
     """
     # 候选接口名（按优先级排列）
+    em_symbol = to_eastmoney_symbol(symbol)
     cashflow_candidates = [
-        "stock_cash_flow_sheet_by_report_em",   # 常见：按报告期
-        "stock_cash_flow_sheet_by_yearly_em",   # 兜底：按年度
+        ("stock_cash_flow_sheet_by_report_em", em_symbol),   # 东方财富要求 SH/SZ 前缀
+        ("stock_cash_flow_sheet_by_yearly_em", em_symbol),
     ]
     profit_candidates = [
-        "stock_profit_sheet_by_report_em",      # 常见：按报告期
-        "stock_profit_sheet_by_yearly_em",      # 兜底：按年度
+        ("stock_profit_sheet_by_report_em", em_symbol),
+        ("stock_profit_sheet_by_yearly_em", em_symbol),
     ]
 
     # 默认返回值
@@ -384,16 +463,16 @@ def fetch_cashflow_and_profit(symbol: str) -> Tuple[Optional[pd.DataFrame], Opti
     profit_api_used = ""
 
     # 依次尝试现金流接口
-    for api_name in cashflow_candidates:
-        temp_df = _call_ak_function_with_retry(api_name, symbol)
+    for api_name, api_symbol in cashflow_candidates:
+        temp_df = _call_ak_function_with_retry(api_name, api_symbol)
         if temp_df is not None and not temp_df.empty:
             cashflow_df = temp_df
             cashflow_api_used = api_name
             break
 
     # 依次尝试利润表接口
-    for api_name in profit_candidates:
-        temp_df = _call_ak_function_with_retry(api_name, symbol)
+    for api_name, api_symbol in profit_candidates:
+        temp_df = _call_ak_function_with_retry(api_name, api_symbol)
         if temp_df is not None and not temp_df.empty:
             profit_df = temp_df
             profit_api_used = api_name
@@ -538,7 +617,38 @@ def calculate_ocf_net_income_ratio(symbol: str) -> dict:
     - message（错误信息或说明）
     """
     try:
-        # 先尝试 AkShare 拉两张表
+        # 先走当前可用的东方财富现金流量表单表路径。
+        ocf, net_income, report_period, source_tag = fetch_by_eastmoney_cashflow(symbol)
+        if ocf is not None and net_income is not None:
+            if net_income <= 0:
+                return {
+                    "ticker": symbol,
+                    "report_period": report_period,
+                    "ocf": ocf,
+                    "net_income": net_income,
+                    "ocf_net_income_ratio": None,
+                    "cashflow_api": "stock_cash_flow_sheet_by_report_em",
+                    "profit_api": "",
+                    "status": "error",
+                    "source": source_tag,
+                    "message": "净利润<=0，不符合策略",
+                }
+
+            ratio = ocf / net_income
+            return {
+                "ticker": symbol,
+                "report_period": report_period,
+                "ocf": ocf,
+                "net_income": net_income,
+                "ocf_net_income_ratio": ratio,
+                "cashflow_api": "stock_cash_flow_sheet_by_report_em",
+                "profit_api": "",
+                "status": "ok",
+                "source": source_tag,
+                "message": "success",
+            }
+
+        # 若单表路径失败，再尝试旧 AkShare 双表路径。
         cashflow_df, profit_df, cashflow_api, profit_api = fetch_cashflow_and_profit(symbol)
 
         # 若 AkShare 失败，自动切换 Baostock
@@ -712,6 +822,10 @@ def main() -> int:
 
         # 4) 规范化股票代码
         candidates_df["ticker_norm"] = candidates_df[ticker_col].apply(normalize_ticker)
+        if "股票代码" in candidates_df.columns:
+            candidates_df["股票代码"] = candidates_df["ticker_norm"]
+        else:
+            candidates_df["股票代码"] = candidates_df["ticker_norm"]
 
         # 4.1) 加载行业信息并计算每只股票阈值
         industry_map = load_industry_map_from_baostock()

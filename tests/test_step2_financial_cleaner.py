@@ -34,6 +34,77 @@ def test_akshare_call_timeout_returns_quickly(monkeypatch) -> None:
     assert elapsed < 0.5
 
 
+def test_eastmoney_symbol_prefix() -> None:
+    assert step2.to_eastmoney_symbol("600741") == "SH600741"
+    assert step2.to_eastmoney_symbol("601668") == "SH601668"
+    assert step2.to_eastmoney_symbol("000719") == "SZ000719"
+    assert step2.to_eastmoney_symbol("300750") == "SZ300750"
+
+
+def test_calculate_ratio_uses_eastmoney_cashflow_single_table(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_cashflow(symbol: str):
+        calls.append(symbol)
+        return pd.DataFrame(
+            [
+                {
+                    "REPORT_DATE": "2026-03-31",
+                    "NETCASH_OPERATE": 120.0,
+                    "NETPROFIT": 100.0,
+                }
+            ]
+        )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("fallback should not be called")
+
+    monkeypatch.setattr(step2.ak, "stock_cash_flow_sheet_by_report_em", fake_cashflow)
+    monkeypatch.setattr(step2, "fetch_cashflow_and_profit", fail_if_called)
+    monkeypatch.setattr(step2, "fetch_by_baostock", fail_if_called)
+    monkeypatch.setattr(step2, "AK_CALL_TIMEOUT_SECONDS", 2)
+    monkeypatch.setattr(step2, "run_with_timeout", lambda func, _timeout, _label: func())
+
+    result = step2.calculate_ocf_net_income_ratio("600741")
+
+    assert calls == ["SH600741"]
+    assert result["status"] == "ok"
+    assert result["source"] == "eastmoney_cashflow"
+    assert result["ocf_net_income_ratio"] == 1.2
+    assert result["profit_api"] == ""
+
+
+def test_eastmoney_cashflow_prefers_latest_annual_report(monkeypatch) -> None:
+    def fake_cashflow(symbol: str):
+        assert symbol == "SH600741"
+        return pd.DataFrame(
+            [
+                {
+                    "REPORT_DATE": "2026-03-31",
+                    "REPORT_TYPE": "一季报",
+                    "NETCASH_OPERATE": -20.0,
+                    "NETPROFIT": 100.0,
+                },
+                {
+                    "REPORT_DATE": "2025-12-31",
+                    "REPORT_TYPE": "年报",
+                    "NETCASH_OPERATE": 150.0,
+                    "NETPROFIT": 100.0,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(step2.ak, "stock_cash_flow_sheet_by_report_em", fake_cashflow)
+    monkeypatch.setattr(step2, "run_with_timeout", lambda func, _timeout, _label: func())
+
+    ocf, net_income, report_period, source = step2.fetch_by_eastmoney_cashflow("600741")
+
+    assert ocf == 150.0
+    assert net_income == 100.0
+    assert report_period == "2025-12-31"
+    assert source == "eastmoney_cashflow"
+
+
 def test_main_removes_stale_output_when_all_financial_fetches_fail(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(step2, "PER_TICKER_SLEEP_SECONDS", 0)
@@ -162,3 +233,44 @@ def test_main_success_keeps_industry_and_threshold_columns(tmp_path: Path, monke
     assert output.loc[0, "行业"] == "银行"
     assert output.loc[0, "OCF阈值"] == 0.5
     assert output.loc[0, "OCF/净利润"] == 0.8
+
+
+def test_main_preserves_leading_zero_tickers(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(step2, "PER_TICKER_SLEEP_SECONDS", 0)
+    monkeypatch.setattr(step2, "load_industry_map_from_baostock", lambda: {})
+    monkeypatch.setattr(
+        step2,
+        "calculate_ocf_net_income_ratio",
+        lambda ticker: {
+            "ticker": ticker,
+            "report_period": "2025-12-31",
+            "ocf": 150.0,
+            "net_income": 100.0,
+            "ocf_net_income_ratio": 1.5,
+            "cashflow_api": "unit",
+            "profit_api": "",
+            "status": "ok",
+            "source": "unit",
+            "message": "success",
+        },
+    )
+    _write_candidates(
+        tmp_path / "candidates.csv",
+        [
+            {
+                "股票代码": "000719",
+                "名称": "中原传媒",
+                "现价": 11.57,
+                "PE(TTM)": 8.64,
+                "PB": 0.96,
+                "股息率(%)": 5.67,
+                "一手成本": 1157.0,
+            }
+        ],
+    )
+
+    assert step2.main() == 0
+
+    raw = (tmp_path / "candidates_step2.csv").read_text(encoding="utf-8-sig")
+    assert "\n000719," in raw
