@@ -151,7 +151,10 @@ This document describes the first build milestone of the daily investment agent 
 - In `--dry-run` mode, external tools are not required.
 - In non-dry mode, `postclose` attempts to run `step1_screener.py` and `step2_financial_cleaner.py`.
 - External refresh scripts are bounded by `postclose.external_refresh_timeout_sec`.
-- If those scripts fail, `postclose` degrades to a `current_positions_only` conservative review rather than using stale candidate CSV files.
+- `step1_screener.py` defaults to the `sina_baidu` source: Sina full-market quotes, Eastmoney dividend plans, and Eastmoney single-name valuation snapshots.
+- `step2_financial_cleaner.py` defaults to `eastmoney_cashflow`: Eastmoney cash-flow statement with SH/SZ-prefixed symbols, using latest annual-report `NETCASH_OPERATE` and `NETPROFIT`.
+- If Step1 succeeds but Step2 fails, `postclose` uses the fresh Step1 candidates, marks `step2_refresh_failed_using_step1`, and avoids stale Step2 output.
+- Only when Step1 also fails does `postclose` degrade to a `current_positions_only` conservative review.
 - Set `postclose.allow_stale_candidate_fallback=true` only when you intentionally want the older fallback behavior.
 - Postclose uses `strategy_lines.enabled=true` by default:
   - `value` is the core value-investing line with larger budget and optional existing-position fallback.

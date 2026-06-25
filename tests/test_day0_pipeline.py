@@ -359,3 +359,107 @@ def test_postclose_degrades_to_current_positions_when_refresh_fails(tmp_path: Pa
     actions = _read_csv(run_dir / "rebalance_actions.csv")
     assert [row["action"] for row in actions] == ["DECREASE", "DECREASE"]
     assert _read_jsonl(tmp_path / "state" / "review_queue.jsonl")[0]["run_id"] == proposal["run_id"]
+
+
+def test_postclose_uses_fresh_step1_candidates_when_step2_fails(tmp_path: Path) -> None:
+    config_path = tmp_path / "agent_config.json"
+    _write_json(
+        config_path,
+        {
+            "timezone_offset_hours": 8,
+            "paths": {
+                "runs_root": "runs",
+                "state_root": "state",
+                "knowledge_root": "knowledge",
+                "step1_csv": "candidates.csv",
+                "step2_csv": "candidates_step2.csv",
+            },
+            "postclose": {
+                "max_candidates_for_research": 2,
+                "allow_stale_candidate_fallback": "false",
+                "external_refresh_timeout_sec": 5,
+            },
+            "constraints": {
+                "max_single_weight": 0.3,
+                "max_industry_weight": 0.6,
+                "min_cash_ratio": 0.1,
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "state" / "account_snapshot.json",
+        {
+            "cash": 100000.0,
+            "total_asset": 100000.0,
+            "stock_asset": 0.0,
+            "cash_ratio": 1.0,
+            "max_single_weight": 0.3,
+            "max_industry_weight": 0.6,
+            "min_cash_ratio": 0.1,
+        },
+    )
+    _write_csv(
+        tmp_path / "state" / "current_positions.csv",
+        fieldnames=["ticker", "name", "shares", "avg_cost", "last_price", "market_value", "weight", "industry", "updated_at"],
+        rows=[],
+    )
+    _write_csv(
+        tmp_path / "candidates_step2.csv",
+        fieldnames=["股票代码", "名称", "PE(TTM)", "PB", "股息率(%)", "行业"],
+        rows=[
+            {"股票代码": "600999", "名称": "旧候选", "PE(TTM)": "5.0", "PB": "0.5", "股息率(%)": "6.0", "行业": "旧行业"}
+        ],
+    )
+    _write_text(
+        tmp_path / "step1_screener.py",
+        "\n".join(
+            [
+                "import pandas as pd",
+                "pd.DataFrame([",
+                " {'股票代码':'600741','名称':'华域汽车','PE(TTM)':7.3,'PB':0.77,'股息率(%)':6.02,'行业':'汽车','命中条件数':5},",
+                " {'股票代码':'601668','名称':'中国建筑','PE(TTM)':5.06,'PB':0.39,'股息率(%)':5.85,'行业':'建筑','命中条件数':5},",
+                "]).to_csv('candidates.csv', index=False, encoding='utf-8-sig')",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(
+        tmp_path / "step2_financial_cleaner.py",
+        "import sys\nprint('step2 failed on purpose')\nsys.exit(3)\n",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SYSTEM_SCRIPT),
+            "--phase",
+            "postclose",
+            "--config",
+            str(config_path),
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    manifest_path = next((tmp_path / "runs").glob("*/*/run_manifest.json"))
+    manifest = _read_json(manifest_path)
+    assert manifest["status"] == "success"
+    assert any(path.endswith("candidates_step1.csv") for path in manifest["artifacts"])
+    assert not any(path.endswith("candidates_step2.csv") for path in manifest["artifacts"])
+
+    run_dir = manifest_path.parent
+    proposal = _read_json(run_dir / "allocation_proposal.json")
+    assert proposal["data_source_degraded"] is False
+    assert "step2_refresh_failed_using_step1" in proposal["gate_warnings"]
+    assert proposal["target_weights"] == {"600741": 0.3, "601668": 0.3}
+    assert proposal["decision"] == "rebalance"
+
+    research_rows = _read_jsonl(run_dir / "stock_research.jsonl")
+    assert {row["source"] for row in research_rows} == {"step1_partial_refresh"}
+    assert {row["analysis_mode"] for row in research_rows} == {"step1_candidate_heuristic"}
+
+    actions = _read_csv(run_dir / "rebalance_actions.csv")
+    assert [row["action"] for row in actions] == ["BUY", "BUY"]
+    assert [row["name"] for row in actions] == ["华域汽车", "中国建筑"]

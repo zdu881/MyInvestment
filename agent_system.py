@@ -65,7 +65,7 @@ DEFAULT_CONFIG = {
         "bootstrap_max_positions": 3,
         "bootstrap_min_score": 0.0,
         "allow_stale_candidate_fallback": False,
-        "external_refresh_timeout_sec": 45.0,
+        "external_refresh_timeout_sec": 90.0,
     },
     "strategy_lines": {
         "enabled": True,
@@ -334,7 +334,7 @@ class AgentSystem:
         return payload
 
     def _run_script(self, script_name: str, log_path: Path, timeout_sec: float | None = None) -> None:
-        cmd = [sys.executable, script_name]
+        cmd = [sys.executable, "-u", script_name]
         try:
             proc = subprocess.run(
                 cmd,
@@ -1237,6 +1237,7 @@ class AgentSystem:
         positions: pd.DataFrame,
         target_weights: Dict[str, float],
         min_action_delta: float,
+        extra_names: Optional[Dict[str, str]] = None,
     ) -> pd.DataFrame:
         current_map = {
             normalize_ticker(row["ticker"]): safe_float(row.get("weight"), 0.0)
@@ -1246,6 +1247,8 @@ class AgentSystem:
             normalize_ticker(row["ticker"]): str(row.get("name", "N/A"))
             for _, row in positions.iterrows()
         }
+        if extra_names:
+            names.update({normalize_ticker(k): str(v) for k, v in extra_names.items()})
 
         tickers = sorted(set(current_map.keys()) | set(target_weights.keys()))
         rows: List[Dict[str, Any]] = []
@@ -1531,6 +1534,8 @@ class AgentSystem:
             postclose_cfg.get("external_refresh_timeout_sec"), 45.0
         )
         refresh_errors: List[Tuple[str, Exception]] = []
+        step1_refreshed = False
+        step2_refreshed = False
 
         # Try to refresh candidates unless dry-run.
         if not dry_run:
@@ -1540,6 +1545,7 @@ class AgentSystem:
                     logs_dir / "step1.log",
                     timeout_sec=external_refresh_timeout_sec,
                 )
+                step1_refreshed = True
             except Exception as e:
                 (logs_dir / "step1_error.txt").write_text(str(e), encoding="utf-8")
                 refresh_errors.append(("step1_screener.py", e))
@@ -1556,24 +1562,49 @@ class AgentSystem:
                         logs_dir / "step2.log",
                         timeout_sec=external_refresh_timeout_sec,
                     )
+                    step2_refreshed = True
                 except Exception as e:
                     (logs_dir / "step2_error.txt").write_text(str(e), encoding="utf-8")
                     refresh_errors.append(("step2_financial_cleaner.py", e))
 
-        data_source_degraded = bool(refresh_errors and not allow_stale_candidate_fallback)
+        use_step1_partial_refresh = bool(
+            refresh_errors
+            and not allow_stale_candidate_fallback
+            and step1_refreshed
+            and not step2_refreshed
+            and step1_path.exists()
+        )
+        data_source_degraded = bool(
+            refresh_errors
+            and not allow_stale_candidate_fallback
+            and not use_step1_partial_refresh
+        )
         degraded_reasons: List[str] = []
-        if data_source_degraded:
+        refresh_warnings: List[str] = []
+        if use_step1_partial_refresh:
+            refresh_warnings.append("step2_refresh_failed_using_step1")
+            details = "; ".join(f"{name}: {err}" for name, err in refresh_errors)
+            degraded_reasons.append(
+                "step1 refreshed successfully but step2 financial cleaner failed; "
+                "using fresh step1 candidates and not using stale step2 output. "
+                f"{details}"
+            )
+        elif data_source_degraded:
             details = "; ".join(f"{name}: {err}" for name, err in refresh_errors)
             degraded_reasons.append(
                 "candidate refresh failed; using current-portfolio-only conservative review. "
                 f"{details}"
             )
 
-        if not data_source_degraded and step1_path.exists():
+        if (not data_source_degraded or use_step1_partial_refresh) and step1_path.exists():
             copied_step1 = ctx.run_dir / "candidates_step1.csv"
             copied_step1.write_bytes(step1_path.read_bytes())
             artifacts.append(str(copied_step1))
-        if not data_source_degraded and step2_path.exists():
+        if (
+            not data_source_degraded
+            and (dry_run or step2_refreshed or allow_stale_candidate_fallback)
+            and step2_path.exists()
+        ):
             copied_step2 = ctx.run_dir / "candidates_step2.csv"
             copied_step2.write_bytes(step2_path.read_bytes())
             artifacts.append(str(copied_step2))
@@ -1600,6 +1631,9 @@ class AgentSystem:
                         for _, row in positions.iterrows()
                     ]
                 )
+        elif use_step1_partial_refresh:
+            candidate_df = pd.read_csv(step1_path, dtype={"股票代码": str, "ticker": str})
+            source_level = "step1_partial_refresh"
         else:
             candidate_df, source_level = self._load_candidate_df(step1_path, step2_path)
 
@@ -1623,7 +1657,7 @@ class AgentSystem:
         research_rows: List[Dict[str, Any]] = []
         for _, row in top_df.iterrows():
             ticker = normalize_ticker(row["ticker_norm"])
-            research_dry_run = dry_run or data_source_degraded
+            research_dry_run = dry_run or data_source_degraded or use_step1_partial_refresh
             tools = self._run_tools(ticker, dry_run=research_dry_run)
             summary = self._derive_research_summary(
                 ticker,
@@ -1631,6 +1665,21 @@ class AgentSystem:
                 name=str(row.get("名称", "N/A")),
                 dry_run=research_dry_run,
             )
+            if use_step1_partial_refresh:
+                pass_count = safe_int(row.get("命中条件数", row.get("pass_count_final", 0)), 0)
+                if pass_count >= 4:
+                    summary["verdict"] = "buy"
+                    summary["confidence"] = round(min(0.9, 0.65 + 0.05 * pass_count), 2)
+                    summary["analysis_mode"] = "step1_candidate_heuristic"
+                    thesis = list(summary.get("thesis", []))
+                    thesis.insert(0, f"Step1 新候选命中 {pass_count}/5 个硬筛条件")
+                    summary["thesis"] = thesis[:3]
+                    risk_flags = list(summary.get("risk_flags", []))
+                    risk_flags.append("Step2 财务清洗缺失，需人工复核现金流与净利润质量")
+                    summary["risk_flags"] = risk_flags[:4]
+                    missing = list(summary.get("missing_evidence", []))
+                    missing.append("补跑 Step2 财务清洗或人工核对最近报告期财务数据")
+                    summary["missing_evidence"] = missing[:4]
             summary["run_id"] = ctx.run_id
             summary["trading_date"] = ctx.trading_date
             summary["as_of_ts"] = ctx.as_of_ts
@@ -1661,7 +1710,12 @@ class AgentSystem:
         violations = self._evaluate_constraints(target_weights, industry_map, account)
 
         min_action_delta = safe_float(self.config.get("gates", {}).get("min_action_delta"), 0.02)
-        actions_df = self._build_actions(positions, target_weights, min_action_delta)
+        actions_df = self._build_actions(
+            positions,
+            target_weights,
+            min_action_delta,
+            extra_names=self._name_map(positions, candidate_df),
+        )
         actions_path = ctx.run_dir / "rebalance_actions.csv"
         actions_df.to_csv(actions_path, index=False, encoding="utf-8-sig")
         artifacts.append(str(actions_path))
@@ -1700,6 +1754,7 @@ class AgentSystem:
         gate_warnings: List[str] = []
         if data_source_degraded:
             gate_warnings.append("data_source_degraded")
+        gate_warnings.extend(refresh_warnings)
         if hard_risk_block and positive_delta > 0:
             gate_failures.append("hard_risk_block_new_buy")
         if evidence_completeness < min_evidence:

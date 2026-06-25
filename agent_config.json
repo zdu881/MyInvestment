@@ -19,7 +19,7 @@
     "default_transaction_cost_rate": 0.0015,
     "bootstrap_on_empty_positions": false,
     "allow_stale_candidate_fallback": false,
-    "external_refresh_timeout_sec": 45.0
+    "external_refresh_timeout_sec": 90.0
   },
   "strategy_lines": {
     "enabled": true,

@@ -167,7 +167,7 @@ python3 agent_system.py --phase postclose
 python3 agent_system.py --phase all
 ```
 
-非 dry-run 的 `postclose` 会先刷新 `step1_screener.py` 和 `step2_financial_cleaner.py`，每个外部刷新脚本默认最多等待 `postclose.external_refresh_timeout_sec` 秒。若外部数据源失败或超时，系统不会复用旧候选池，而是降级为 `current_positions_only`：仅基于当前持仓、现金比例和组合约束生成保守观察/减仓建议。只有明确设置 `postclose.allow_stale_candidate_fallback=true` 时才允许旧候选池兜底。
+非 dry-run 的 `postclose` 会先刷新 `step1_screener.py` 和 `step2_financial_cleaner.py`，每个外部刷新脚本默认最多等待 `postclose.external_refresh_timeout_sec` 秒。`step1_screener.py` 默认使用 `sina_baidu` 数据源：新浪全市场行情、东方财富分红送配、东方财富单票估值。`step2_financial_cleaner.py` 默认使用东方财富现金流量表单表 `eastmoney_cashflow`，优先取最新年报中的 `NETCASH_OPERATE` 与 `NETPROFIT`。若 Step1 成功但 Step2 财务清洗失败，系统会使用本轮新生成的 Step1 候选继续选股，并标记 `step2_refresh_failed_using_step1`；只有 Step1 也失败时才降级为 `current_positions_only`。只有明确设置 `postclose.allow_stale_candidate_fallback=true` 时才允许旧候选池兜底。
 
 收盘提案默认启用 `strategy_lines.enabled=true` 的双线模式：
 - `value`：价投核心仓，预算较高，可在无新增买点时保守保留现有核心持仓。
