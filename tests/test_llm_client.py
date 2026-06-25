@@ -123,6 +123,30 @@ def test_agent_system_falls_back_when_llm_errors(tmp_path: Path, monkeypatch) ->
     assert summary["llm"]["error"] == "provider unavailable"
 
 
+def test_non_ah_result_does_not_reduce_research_confidence(tmp_path: Path) -> None:
+    config_path = tmp_path / "agent_config.json"
+    config_path.write_text(
+        json.dumps({"paths": {"runs_root": "runs", "state_root": "state"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    system = agent_system.AgentSystem(str(config_path))
+
+    summary = system._derive_research_summary_base(
+        "600741",
+        tools={
+            "health": {"ok": True, "data": {"big_fluctuation": False, "ocf_growth_pct": 10.0, "risk_flags": []}},
+            "sentiment": {"ok": True, "data": {"risk_score": 0.0, "categories": [], "negative_events": []}},
+            "ah": {"ok": True, "message": "not_applicable", "data": {"applicable": False}},
+        },
+    )
+
+    assert summary["confidence"] == 1.0
+    assert summary["verdict"] == "buy"
+    assert not summary["risk_flags"]
+    assert not summary["missing_evidence"]
+    assert any("非 A+H" in item for item in summary["thesis"])
+
+
 def test_llm_client_requires_api_key(tmp_path: Path) -> None:
     config = llm_client.LLMRuntimeConfig.from_runtime_config(
         {"enabled": True, "env_file": ""},

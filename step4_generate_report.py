@@ -140,12 +140,16 @@ def summarize_tool_outputs(health: Dict[str, Any], sentiment: Dict[str, Any], ah
         risk_flags.append("舆情检查失败或缺失")
 
     if ah.get("ok"):
-        p = ah.get("data", {}).get("ah_premium_pct")
-        if isinstance(p, (int, float)):
-            if p > 30:
-                risk_flags.append(f"A/H 溢价较高（{p:.2f}%）")
-            else:
-                buy_reasons.append(f"A/H 溢价压力可控（{p:.2f}%）")
+        ah_data = ah.get("data", {})
+        if ah_data.get("applicable") is False:
+            buy_reasons.append("非 A+H 标的，不适用跨市场溢价约束")
+        else:
+            p = ah_data.get("ah_premium_pct")
+            if isinstance(p, (int, float)):
+                if p > 30:
+                    risk_flags.append(f"A/H 溢价较高（{p:.2f}%）")
+                else:
+                    buy_reasons.append(f"A/H 溢价压力可控（{p:.2f}%）")
 
     if not buy_reasons:
         buy_reasons.append("估值处于防御区间，符合低估值初筛")

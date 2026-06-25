@@ -564,11 +564,15 @@ class AgentSystem:
             missing_evidence.append("补全近3个月舆情与公告核查")
 
         if ah_ok:
-            premium = ah.get("data", {}).get("ah_premium_pct")
-            if isinstance(premium, (int, float)) and premium > 30:
-                risk_flags.append(f"A/H 溢价偏高（{premium:.2f}%）")
-            elif isinstance(premium, (int, float)):
-                thesis.append(f"A/H 溢价可控（{premium:.2f}%）")
+            ah_data = ah.get("data", {})
+            if ah_data.get("applicable") is False:
+                thesis.append("非 A+H 标的，不适用跨市场溢价约束")
+            else:
+                premium = ah_data.get("ah_premium_pct")
+                if isinstance(premium, (int, float)) and premium > 30:
+                    risk_flags.append(f"A/H 溢价偏高（{premium:.2f}%）")
+                elif isinstance(premium, (int, float)):
+                    thesis.append(f"A/H 溢价可控（{premium:.2f}%）")
         else:
             thesis.append("A/H 溢价信息不可用，不作为阻断项")
             missing_evidence.append("补全跨市场估值对照")
@@ -609,7 +613,7 @@ class AgentSystem:
 
         return {
             "ticker": ticker,
-            "thesis": thesis[:3],
+            "thesis": thesis[:4],
             "risk_flags": risk_flags[:4],
             "confidence": confidence,
             "verdict": verdict,

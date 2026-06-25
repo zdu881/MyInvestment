@@ -414,11 +414,15 @@ def calculate_ah_premium(ticker: str) -> Dict[str, Any]:
 
     if hk_ticker is None:
         return ToolResult(
-            ok=False,
+            ok=True,
             tool="calculate_ah_premium",
             ticker=a_ticker,
-            message="未命中 A+H 映射（可在代码 mapping 中补充）",
-            data={},
+            message="not_applicable: 未命中 A+H 映射，按非 A+H 标的处理",
+            data={
+                "a_ticker": a_ticker,
+                "applicable": False,
+                "reason": "not_ah_share_or_mapping_absent",
+            },
         ).to_dict()
 
     a_price = _fetch_a_price(a_ticker)
@@ -430,7 +434,13 @@ def calculate_ah_premium(ticker: str) -> Dict[str, Any]:
             tool="calculate_ah_premium",
             ticker=a_ticker,
             message="A 股或 H 股价格获取失败",
-            data={"a_price": a_price, "h_price": h_price, "hk_ticker": hk_ticker},
+            data={
+                "a_ticker": a_ticker,
+                "hk_ticker": hk_ticker,
+                "applicable": True,
+                "a_price": a_price,
+                "h_price": h_price,
+            },
         ).to_dict()
 
     premium = (a_price / h_price - 1.0) * 100.0
@@ -443,6 +453,7 @@ def calculate_ah_premium(ticker: str) -> Dict[str, Any]:
         data={
             "a_ticker": a_ticker,
             "hk_ticker": hk_ticker,
+            "applicable": True,
             "a_price": a_price,
             "h_price": h_price,
             "ah_premium_pct": premium,

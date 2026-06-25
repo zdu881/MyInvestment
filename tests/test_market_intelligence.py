@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pandas as pd
+
 import market_intelligence
 import mcp_tools
 from step4_generate_report import summarize_tool_outputs
@@ -124,6 +126,50 @@ def test_search_market_sentiment_returns_failure_when_sources_unavailable(monkey
     assert result["ticker"] == "600519"
     assert result["data"]["negative_events"] == []
     assert "公开新闻源检索失败" in result["message"]
+
+
+def test_financial_health_check_uses_eastmoney_prefixed_symbol(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_call(func_name: str, **kwargs):
+        symbol = str(kwargs.get("symbol", ""))
+        calls.append((func_name, symbol))
+        assert symbol == "SH600741"
+        if "profit" in func_name:
+            return pd.DataFrame(
+                [
+                    {"REPORT_DATE": "2023-12-31", "TOTAL_OPERATE_INCOME": 100.0, "NETPROFIT": 10.0},
+                    {"REPORT_DATE": "2024-12-31", "TOTAL_OPERATE_INCOME": 110.0, "NETPROFIT": 12.0},
+                    {"REPORT_DATE": "2025-12-31", "TOTAL_OPERATE_INCOME": 120.0, "NETPROFIT": 14.0},
+                ]
+            )
+        return pd.DataFrame(
+            [
+                {"REPORT_DATE": "2023-12-31", "NETCASH_OPERATE": 11.0},
+                {"REPORT_DATE": "2024-12-31", "NETCASH_OPERATE": 13.0},
+                {"REPORT_DATE": "2025-12-31", "NETCASH_OPERATE": 15.0},
+            ]
+        )
+
+    monkeypatch.setattr(mcp_tools, "call_ak_with_retry", fake_call)
+
+    result = mcp_tools.get_financial_health_check("600741")
+
+    assert result["ok"] is True
+    assert result["ticker"] == "600741"
+    assert calls == [
+        ("stock_profit_sheet_by_report_em", "SH600741"),
+        ("stock_cash_flow_sheet_by_report_em", "SH600741"),
+    ]
+
+
+def test_ah_premium_not_applicable_is_successful_neutral_result() -> None:
+    result = mcp_tools.calculate_ah_premium("600741")
+
+    assert result["ok"] is True
+    assert result["ticker"] == "600741"
+    assert result["data"]["applicable"] is False
+    assert "not_applicable" in result["message"]
 
 
 def test_summarize_tool_outputs_uses_sentiment_risk_score() -> None:
