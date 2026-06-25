@@ -235,6 +235,51 @@ def test_main_success_keeps_industry_and_threshold_columns(tmp_path: Path, monke
     assert output.loc[0, "OCF/净利润"] == 0.8
 
 
+def test_main_uses_name_industry_fallback_when_industry_map_empty(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(step2, "PER_TICKER_SLEEP_SECONDS", 0)
+    monkeypatch.setattr(step2, "load_industry_map_from_baostock", lambda: {})
+    monkeypatch.setattr(
+        step2,
+        "calculate_ocf_net_income_ratio",
+        lambda ticker: {
+            "ticker": ticker,
+            "report_period": "2025-12-31",
+            "ocf": 40.0,
+            "net_income": 100.0,
+            "ocf_net_income_ratio": 0.4,
+            "cashflow_api": "unit",
+            "profit_api": "",
+            "status": "ok",
+            "source": "unit",
+            "message": "success",
+        },
+    )
+    _write_candidates(
+        tmp_path / "candidates.csv",
+        [
+            {
+                "股票代码": "601668",
+                "名称": "中国建筑",
+                "现价": 4.45,
+                "PE(TTM)": 4.88,
+                "PB": 0.37,
+                "股息率(%)": 6.07,
+                "一手成本": 445.0,
+            }
+        ],
+    )
+
+    assert step2.main() == 0
+
+    output = pd.read_csv(tmp_path / "candidates_step2.csv", encoding="utf-8-sig")
+    assert len(output) == 1
+    assert output.loc[0, "名称"] == "中国建筑"
+    assert output.loc[0, "行业"] == "建筑工程"
+    assert output.loc[0, "OCF阈值"] == 0.3
+    assert output.loc[0, "OCF/净利润"] == 0.4
+
+
 def test_main_preserves_leading_zero_tickers(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(step2, "PER_TICKER_SLEEP_SECONDS", 0)

@@ -55,6 +55,7 @@ INDUSTRY_OCF_THRESHOLD_RULES = [
     ("银行", 0.5),
     ("建筑", 0.3),
     ("工程", 0.3),
+    ("铁路", 0.6),
     ("高速公路", 0.6),
     ("港口", 0.6),
     ("煤炭", 0.8),
@@ -282,6 +283,61 @@ def to_eastmoney_symbol(value: str) -> str:
     if ticker.startswith(("6", "9")):
         return f"SH{ticker}"
     return f"SZ{ticker}"
+
+
+UNKNOWN_INDUSTRY_VALUES = {"", "-", "--", "none", "nan", "未知"}
+
+
+def clean_industry_value(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if text.lower() in UNKNOWN_INDUSTRY_VALUES:
+        return None
+    return text
+
+
+def infer_industry_from_candidate(row: pd.Series) -> Optional[str]:
+    for col in ["行业", "industry", "所属行业"]:
+        if col in row.index:
+            industry = clean_industry_value(row.get(col))
+            if industry:
+                return industry
+
+    name = str(row.get("名称", row.get("name", ""))).strip()
+    keyword_rules = [
+        ("银行", "银行"),
+        ("中铁", "建筑工程"),
+        ("铁建", "建筑工程"),
+        ("交建", "建筑工程"),
+        ("中交", "建筑工程"),
+        ("隧道", "建筑工程"),
+        ("建筑", "建筑工程"),
+        ("工程", "建筑工程"),
+        ("高速", "高速公路"),
+        ("公路", "高速公路"),
+        ("港口", "港口"),
+        ("煤", "煤炭"),
+        ("石化", "石油"),
+        ("石油", "石油"),
+        ("天然气", "天然气"),
+        ("燃气", "天然气"),
+        ("电力", "电力"),
+        ("发电", "电力"),
+        ("高铁", "铁路"),
+        ("铁路", "铁路"),
+    ]
+    for keyword, industry in keyword_rules:
+        if keyword in name:
+            return industry
+    return None
+
+
+def resolve_industry_for_candidate(row: pd.Series, industry_map: Dict[str, str]) -> str:
+    ticker = str(row.get("ticker_norm", ""))
+    mapped = clean_industry_value(industry_map.get(ticker))
+    if mapped:
+        return mapped
+    inferred = infer_industry_from_candidate(row)
+    return inferred if inferred else "未知"
 
 
 def _load_industry_map_from_baostock_unchecked() -> Dict[str, str]:
@@ -829,7 +885,12 @@ def main() -> int:
 
         # 4.1) 加载行业信息并计算每只股票阈值
         industry_map = load_industry_map_from_baostock()
-        candidates_df["行业"] = candidates_df["ticker_norm"].map(industry_map).fillna("未知")
+        if not industry_map:
+            print("[WARN] 行业映射数据为空，将使用候选文件行业列或名称关键词兜底")
+        candidates_df["行业"] = candidates_df.apply(
+            lambda row: resolve_industry_for_candidate(row, industry_map),
+            axis=1,
+        )
         candidates_df["行业阈值"] = candidates_df["行业"].apply(get_threshold_by_industry)
 
         # 5) 逐只股票计算 OCF/NetIncome

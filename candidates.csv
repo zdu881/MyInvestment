@@ -1,7 +1,9 @@
 ﻿股票代码,名称,现价,PE(TTM),PB,股息率(%),一手成本,数据源,命中条件数,命中_市值,命中_PE,命中_PB,命中_一手成本,命中_股息率
-601668,中国建筑,4.45,4.88,0.37,6.07,445.0,sina_baidu,5,True,True,True,True,True
-600741,华域汽车,16.65,7.26,0.77,6.05,1665.0,sina_baidu,5,True,True,True,True,True
-600861,北京人力,12.56,8.41,0.94,7.23,1256.0,sina_baidu,4,False,True,True,True,True
-002572,索菲亚,7.58,8.61,1.0,7.16,758.0,sina_baidu,4,False,True,True,True,True
-601717,中创智领,14.7,6.55,1.07,7.0,1470.0,sina_baidu,4,True,True,False,True,True
-000719,中原传媒,11.53,8.58,0.95,5.71,1153.0,sina_baidu,4,False,True,True,True,True
+601668,中国建筑,4.44,4.84,0.37,6.12,444.0,sina_baidu,5,True,True,True,True,True
+600741,华域汽车,16.56,7.28,0.77,6.04,1656.0,sina_baidu,5,True,True,True,True,True
+600861,北京人力,12.51,8.41,0.94,7.23,1251.0,sina_baidu,4,False,True,True,True,True
+002572,索菲亚,7.56,8.56,0.99,7.16,756.0,sina_baidu,4,False,True,True,True,True
+601717,中创智领,14.7,6.41,1.05,7.0,1470.0,sina_baidu,4,True,True,False,True,True
+600039,四川路桥,8.0,9.91,1.31,5.75,800.0,sina_baidu,4,True,True,False,True,True
+000719,中原传媒,11.5,8.55,0.95,5.74,1150.0,sina_baidu,4,False,True,True,True,True
+600873,梅花生物,7.54,8.88,1.29,5.68,754.0,sina_baidu,4,True,True,False,True,True

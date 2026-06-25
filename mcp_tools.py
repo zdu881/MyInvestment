@@ -79,6 +79,14 @@ def normalize_ticker(ticker: str) -> str:
     return digits.zfill(6)[-6:]
 
 
+def to_eastmoney_symbol(ticker: str) -> str:
+    """Convert an A-share ticker to the SH/SZ format required by Eastmoney APIs."""
+    symbol = normalize_ticker(ticker)
+    if symbol.startswith(("6", "9")):
+        return f"SH{symbol}"
+    return f"SZ{symbol}"
+
+
 def find_first_existing_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     """在候选列里返回第一个存在的列名。"""
     for col in candidates:
@@ -154,16 +162,17 @@ def get_financial_health_check(ticker: str) -> Dict[str, Any]:
     并计算波动情况与“是否大起大落”的简化判断。
     """
     symbol = normalize_ticker(ticker)
+    em_symbol = to_eastmoney_symbol(symbol)
 
     # 1) 拉利润表（收入、净利润）
-    profit_df = call_ak_with_retry("stock_profit_sheet_by_report_em", symbol=symbol)
+    profit_df = call_ak_with_retry("stock_profit_sheet_by_report_em", symbol=em_symbol)
     if profit_df is None:
-        profit_df = call_ak_with_retry("stock_profit_sheet_by_yearly_em", symbol=symbol)
+        profit_df = call_ak_with_retry("stock_profit_sheet_by_yearly_em", symbol=em_symbol)
 
     # 2) 拉现金流量表（经营现金流净额）
-    cash_df = call_ak_with_retry("stock_cash_flow_sheet_by_report_em", symbol=symbol)
+    cash_df = call_ak_with_retry("stock_cash_flow_sheet_by_report_em", symbol=em_symbol)
     if cash_df is None:
-        cash_df = call_ak_with_retry("stock_cash_flow_sheet_by_yearly_em", symbol=symbol)
+        cash_df = call_ak_with_retry("stock_cash_flow_sheet_by_yearly_em", symbol=em_symbol)
 
     if profit_df is None or cash_df is None:
         return ToolResult(
