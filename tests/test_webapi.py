@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from state_io import advisory_lock
-from webapi.main import create_app
+from webapi.main import ExecutionSubmitRequest, build_execute_command, create_app
 from webapi.services.command_runner import CommandResult
 from webapi.settings import AppSettings
 
@@ -650,6 +650,27 @@ def test_execution_blocked_when_manual_only_enabled(tmp_path: Path) -> None:
         if line.strip()
     ]
     assert any(row.get("action") == "execute_run_blocked" for row in rows)
+
+
+def test_build_execute_command_supports_virtual_portfolio() -> None:
+    command = build_execute_command(
+        "run-virtual",
+        ExecutionSubmitRequest(
+            executor="tester",
+            dry_run=False,
+            force=True,
+            confirm_manual_fill=False,
+            virtual=True,
+        ),
+    )
+
+    command_text = " ".join(command)
+    assert "agent_execute.py" in command_text
+    assert "--run-id run-virtual" in command_text
+    assert "--executor tester" in command_text
+    assert "--force" in command
+    assert "--virtual" in command
+    assert "--confirm-manual-fill" not in command
 
 
 def test_execution_requires_manual_fill_confirmation_for_state_apply(tmp_path: Path) -> None:

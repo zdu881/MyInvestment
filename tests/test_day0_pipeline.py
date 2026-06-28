@@ -234,6 +234,166 @@ def test_agent_execute_blocks_non_dry_run_in_manual_only_mode(tmp_path: Path) ->
     assert "manual_only" in message
 
 
+def test_agent_execute_virtual_portfolio_applies_without_mutating_real_state(tmp_path: Path) -> None:
+    config_path = tmp_path / "agent_config.json"
+    _write_json(
+        config_path,
+        {
+            "paths": {
+                "runs_root": "runs",
+                "state_root": "state",
+            },
+            "constraints": {
+                "max_single_weight": 0.3,
+                "max_industry_weight": 0.8,
+                "min_cash_ratio": 0.1,
+            },
+            "execution": {
+                "manual_only": True,
+                "confirmation_required": True,
+                "max_cost_ratio_total_asset": 0.01,
+            },
+            "virtual_portfolio": {
+                "positions_path": "state/virtual_positions.csv",
+                "account_path": "state/virtual_account_snapshot.json",
+                "history_path": "state/virtual_execution_history.jsonl",
+                "initialize_from_real": True,
+            },
+        },
+    )
+    real_account = {
+        "cash": 5000.0,
+        "stock_asset": 20000.0,
+        "total_asset": 25000.0,
+        "cash_ratio": 0.2,
+        "max_single_weight": 0.3,
+        "max_industry_weight": 0.8,
+        "min_cash_ratio": 0.1,
+    }
+    _write_json(tmp_path / "state" / "account_snapshot.json", real_account)
+    _write_csv(
+        tmp_path / "state" / "current_positions.csv",
+        fieldnames=["ticker", "name", "shares", "avg_cost", "last_price", "market_value", "weight", "industry", "updated_at"],
+        rows=[
+            {
+                "ticker": "600941",
+                "name": "中国移动",
+                "shares": "100",
+                "avg_cost": "93.94",
+                "last_price": "91.65",
+                "market_value": "9165.00",
+                "weight": "0.3666",
+                "industry": "通信",
+                "updated_at": "2026-06-18T15:00:00+08:00",
+            },
+            {
+                "ticker": "601816",
+                "name": "京沪高铁",
+                "shares": "2100",
+                "avg_cost": "4.952",
+                "last_price": "4.59",
+                "market_value": "9639.00",
+                "weight": "0.3856",
+                "industry": "交通运输",
+                "updated_at": "2026-06-18T15:00:00+08:00",
+            },
+        ],
+    )
+    real_positions_before = (tmp_path / "state" / "current_positions.csv").read_text(encoding="utf-8-sig")
+    real_account_before = _read_json(tmp_path / "state" / "account_snapshot.json")
+
+    run_id = "virtual-run-0001"
+    proposal_id = "proposal-virtual-0001"
+    run_dir = tmp_path / "runs" / "2026-06-28" / run_id
+    _write_json(
+        run_dir / "allocation_proposal.json",
+        {
+            "run_id": run_id,
+            "proposal_id": proposal_id,
+            "review_status": "approved",
+            "target_weights": {"600941": 0.2, "601816": 0.1},
+            "new_portfolio": [
+                {"ticker": "600941", "name": "中国移动", "industry": "通信"},
+                {"ticker": "601816", "name": "京沪高铁", "industry": "交通运输"},
+            ],
+        },
+    )
+    _write_json(
+        run_dir / "review_decision.json",
+        {"run_id": run_id, "proposal_id": proposal_id, "human_decision": "approve"},
+    )
+    _write_csv(
+        run_dir / "candidates_step2.csv",
+        fieldnames=["股票代码", "名称", "现价", "行业"],
+        rows=[
+            {"股票代码": "600941", "名称": "中国移动", "现价": "90.00", "行业": "通信"},
+            {"股票代码": "601816", "名称": "京沪高铁", "现价": "5.00", "行业": "交通运输"},
+        ],
+    )
+    _write_csv(
+        run_dir / "execution_orders.csv",
+        fieldnames=["ticker", "action", "delta_weight"],
+        rows=[
+            {"ticker": "600941", "action": "DECREASE", "delta_weight": "-0.1666"},
+            {"ticker": "601816", "action": "DECREASE", "delta_weight": "-0.2856"},
+        ],
+    )
+    queue_item = {
+        "queue_id": "exec-virtual-0001",
+        "run_id": run_id,
+        "proposal_id": proposal_id,
+        "status": "pending",
+        "execution_orders_path": str(run_dir / "execution_orders.csv"),
+    }
+    _write_text(
+        tmp_path / "state" / "execution_queue.jsonl",
+        json.dumps(queue_item, ensure_ascii=False) + "\n",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(EXEC_SCRIPT),
+            "--config",
+            str(config_path),
+            "--run-id",
+            run_id,
+            "--executor",
+            "virtual_tester",
+            "--virtual",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "virtual=True" in proc.stdout
+    assert (tmp_path / "state" / "current_positions.csv").read_text(encoding="utf-8-sig") == real_positions_before
+    assert _read_json(tmp_path / "state" / "account_snapshot.json") == real_account_before
+    assert _read_jsonl(tmp_path / "state" / "execution_queue.jsonl")[0]["status"] == "pending"
+
+    virtual_account = _read_json(tmp_path / "state" / "virtual_account_snapshot.json")
+    assert virtual_account["portfolio_type"] == "virtual"
+    assert virtual_account["last_virtual_run_id"] == run_id
+    assert virtual_account["stock_asset"] == 7500.0
+    assert virtual_account["cash"] < 17500.0
+
+    virtual_positions = _read_csv(tmp_path / "state" / "virtual_positions.csv")
+    assert [row["ticker"] for row in virtual_positions] == ["600941", "601816"]
+    assert [row["market_value"] for row in virtual_positions] == ["5000.0", "2500.0"]
+
+    result = _read_json(run_dir / "virtual_execution_result.json")
+    assert result["virtual"] is True
+    assert result["dry_run"] is False
+    assert result["position_count"] == 2
+    assert (run_dir / "virtual_portfolio_before_snapshot.csv").exists()
+    assert (run_dir / "virtual_portfolio_after_snapshot.csv").exists()
+    assert (run_dir / "virtual_portfolio_change_report.md").exists()
+    assert _read_jsonl(tmp_path / "state" / "virtual_execution_history.jsonl")[0]["run_id"] == run_id
+    assert not (run_dir / "execution_result.json").exists()
+
+
 def test_postclose_degrades_to_current_positions_when_refresh_fails(tmp_path: Path) -> None:
     config_path = tmp_path / "agent_config.json"
     _write_json(
