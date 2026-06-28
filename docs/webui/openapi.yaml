@@ -1004,6 +1004,9 @@ components:
         confirm_manual_fill:
           type: boolean
           default: false
+        virtual:
+          type: boolean
+          default: false
 
     SchedulerOnceRequest:
       type: object

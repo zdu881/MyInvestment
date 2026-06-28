@@ -30,6 +30,27 @@ class ExecutionSubmitRequest(BaseModel):
     dry_run: bool = False
     force: bool = False
     confirm_manual_fill: bool = False
+    virtual: bool = False
+
+
+def build_execute_command(run_id: str, body: ExecutionSubmitRequest) -> list[str]:
+    command = [
+        sys.executable,
+        "agent_execute.py",
+        "--run-id",
+        run_id,
+        "--executor",
+        body.executor,
+    ]
+    if body.dry_run:
+        command.append("--dry-run")
+    if body.force:
+        command.append("--force")
+    if body.confirm_manual_fill:
+        command.append("--confirm-manual-fill")
+    if body.virtual:
+        command.append("--virtual")
+    return command
 
 
 class SchedulerOnceRequest(BaseModel):
@@ -956,7 +977,7 @@ def create_app(
             else {}
         )
         manual_only = _to_bool(execution_cfg.get("manual_only"), False)
-        if manual_only and not body.dry_run:
+        if manual_only and not body.dry_run and not body.virtual:
             payload = body.model_dump() | {"run_id": run_id, "blocked_reason": "manual_only"}
             _audit(
                 repo=repo,
@@ -971,7 +992,7 @@ def create_app(
                 status=409,
             )
         confirmation_required = _to_bool(execution_cfg.get("confirmation_required"), True)
-        if confirmation_required and not body.dry_run and not body.confirm_manual_fill:
+        if confirmation_required and not body.dry_run and not body.confirm_manual_fill and not body.virtual:
             payload = body.model_dump() | {
                 "run_id": run_id,
                 "blocked_reason": "manual_fill_confirmation_required",
@@ -991,20 +1012,7 @@ def create_app(
 
         if not repo.has_pending_execution(run_id):
             raise _error("conflict", f"run {run_id} is not pending execution", status=409)
-        command = [
-            sys.executable,
-            "agent_execute.py",
-            "--run-id",
-            run_id,
-            "--executor",
-            body.executor,
-        ]
-        if body.dry_run:
-            command.append("--dry-run")
-        if body.force:
-            command.append("--force")
-        if body.confirm_manual_fill:
-            command.append("--confirm-manual-fill")
+        command = build_execute_command(run_id, body)
         result = runner(_inject_config_path(command, cfg.config_path), cfg.root_dir, cfg.command_timeout_sec)
         _audit(
             repo=repo,
