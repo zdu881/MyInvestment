@@ -6,6 +6,10 @@ state/review_queue.jsonl
 state/review_history.jsonl
 state/execution_queue.jsonl
 state/execution_history.jsonl
+state/queues.lock
+state/virtual_account_snapshot.json
+state/virtual_execution_history.jsonl
+state/virtual_positions.csv
 state/maintenance_last_run.json
 state/model_feedback.json
 state/proposal_quality_history.jsonl

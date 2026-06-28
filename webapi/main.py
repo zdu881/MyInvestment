@@ -31,6 +31,7 @@ class ExecutionSubmitRequest(BaseModel):
     force: bool = False
     confirm_manual_fill: bool = False
     virtual: bool = False
+    virtual_reset: bool = False
 
 
 def build_execute_command(run_id: str, body: ExecutionSubmitRequest) -> list[str]:
@@ -50,6 +51,8 @@ def build_execute_command(run_id: str, body: ExecutionSubmitRequest) -> list[str
         command.append("--confirm-manual-fill")
     if body.virtual:
         command.append("--virtual")
+    if body.virtual_reset:
+        command.append("--virtual-reset")
     return command
 
 

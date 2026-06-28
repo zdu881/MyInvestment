@@ -200,6 +200,28 @@ def load_name_map(run_dir: Path) -> Dict[str, str]:
     return name_map
 
 
+def augment_market_maps_from_positions(
+    price_map: Dict[str, float],
+    name_map: Dict[str, str],
+    positions_df: pd.DataFrame,
+) -> None:
+    if positions_df.empty:
+        return
+    for _, row in positions_df.iterrows():
+        ticker = normalize_ticker(row.get("ticker", ""))
+        if not ticker:
+            continue
+        price = safe_float(row.get("last_price"), 0.0)
+        if price <= 0:
+            price = safe_float(row.get("avg_cost"), 0.0)
+        if price > 0 and safe_float(price_map.get(ticker), 0.0) <= 0:
+            price_map[ticker] = price
+
+        name = str(row.get("name", "")).strip()
+        if name and name.lower() not in {"n/a", "nan", "none"} and ticker not in name_map:
+            name_map[ticker] = name
+
+
 def load_positions_df(path: Path) -> pd.DataFrame:
     cols = [
         "ticker",
@@ -343,9 +365,10 @@ def load_virtual_account(
     real_account_path: Path,
     virtual_cfg: Dict[str, Any],
     executed_at: str,
+    reset: bool = False,
 ) -> Dict[str, Any]:
     account = load_json(virtual_account_path)
-    if account:
+    if account and not reset:
         return account
 
     initialize_from_real = safe_bool(
@@ -376,8 +399,9 @@ def load_virtual_positions_df(
     virtual_positions_path: Path,
     real_positions_path: Path,
     virtual_cfg: Dict[str, Any],
+    reset: bool = False,
 ) -> pd.DataFrame:
-    if virtual_positions_path.exists():
+    if virtual_positions_path.exists() and not reset:
         return load_positions_df(virtual_positions_path)
     initialize_from_real = safe_bool(
         virtual_cfg.get("initialize_from_real"),
@@ -706,6 +730,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="apply the approved task to the virtual portfolio ledger only",
     )
+    parser.add_argument(
+        "--virtual-reset",
+        action="store_true",
+        help="reset the virtual ledger from configured baseline before applying --virtual",
+    )
     parser.add_argument("--lock-timeout-sec", type=float, default=10.0)
     return parser.parse_args()
 
@@ -730,15 +759,29 @@ def _run_locked_execution(
     queue_path = state_root / "execution_queue.jsonl"
 
     queue_rows = read_jsonl(queue_path)
-    if not queue_rows:
-        raise SystemExit("execution queue is empty")
-
     queue_item, queue_idx = pick_queue_item(queue_rows, args.queue_id, args.run_id)
-    if queue_item is None or queue_idx is None:
-        raise SystemExit("no pending queue item matched")
 
-    run_id = str(queue_item.get("run_id", ""))
-    proposal_id = str(queue_item.get("proposal_id", ""))
+    pre_warnings: List[str] = []
+    if queue_item is None or queue_idx is None:
+        if not args.virtual:
+            if not queue_rows:
+                raise SystemExit("execution queue is empty")
+            raise SystemExit("no pending queue item matched")
+        if not args.run_id:
+            raise SystemExit("--virtual requires --run-id when no pending queue item matched")
+        run_id = str(args.run_id)
+        proposal_id = ""
+        queue_item = {
+            "queue_id": f"virtual:{run_id}",
+            "run_id": run_id,
+            "proposal_id": "",
+            "status": "virtual",
+        }
+        pre_warnings.append("virtual execution used proposal directly without pending execution queue item")
+    else:
+        run_id = str(queue_item.get("run_id", ""))
+        proposal_id = str(queue_item.get("proposal_id", ""))
+
     run_dir = find_run_dir(run_id, runs_root)
     if run_dir is None:
         raise SystemExit(f"run dir not found for run_id={run_id}")
@@ -752,16 +795,32 @@ def _run_locked_execution(
 
     if not proposal:
         raise SystemExit(f"proposal missing: {proposal_path}")
-    if not review:
-        raise SystemExit(f"review decision missing: {review_path}")
-    if str(review.get("human_decision")) != "approve":
-        raise SystemExit("review decision is not approve, refuse execution")
+    if not proposal_id:
+        proposal_id = str(proposal.get("proposal_id", "") or proposal.get("decision_id", "") or run_id)
+        queue_item["proposal_id"] = proposal_id
 
-    if str(proposal.get("review_status", "")) != "approved":
-        raise SystemExit("proposal review_status is not approved")
+    if args.virtual:
+        if not review:
+            pre_warnings.append("virtual execution used proposal without review decision")
+        elif str(review.get("human_decision")) != "approve":
+            pre_warnings.append(
+                f"virtual execution used non-approved review decision: {review.get('human_decision')}"
+            )
+        if str(proposal.get("review_status", "")) != "approved":
+            pre_warnings.append(
+                f"virtual execution used proposal with review_status={proposal.get('review_status', '')}"
+            )
+    else:
+        if not review:
+            raise SystemExit(f"review decision missing: {review_path}")
+        if str(review.get("human_decision")) != "approve":
+            raise SystemExit("review decision is not approve, refuse execution")
 
-    if str(queue_item.get("status", "")) != "pending":
-        raise SystemExit("queue item is not pending")
+        if str(proposal.get("review_status", "")) != "approved":
+            raise SystemExit("proposal review_status is not approved")
+
+        if str(queue_item.get("status", "")) != "pending":
+            raise SystemExit("queue item is not pending")
 
     target_weights = proposal.get("target_weights", {})
     if not isinstance(target_weights, dict):
@@ -781,8 +840,19 @@ def _run_locked_execution(
 
     executed_at = now_local_iso(args.timezone_offset_hours)
     if args.virtual:
-        account = load_virtual_account(account_path, real_account_path, virtual_cfg, executed_at)
-        before_positions_df = load_virtual_positions_df(positions_path, real_positions_path, virtual_cfg)
+        account = load_virtual_account(
+            account_path,
+            real_account_path,
+            virtual_cfg,
+            executed_at,
+            reset=bool(args.virtual_reset),
+        )
+        before_positions_df = load_virtual_positions_df(
+            positions_path,
+            real_positions_path,
+            virtual_cfg,
+            reset=bool(args.virtual_reset),
+        )
     else:
         account = load_json(account_path)
         before_positions_df = load_positions_df(positions_path)
@@ -794,13 +864,14 @@ def _run_locked_execution(
 
     price_map = load_price_map(run_dir)
     name_map = load_name_map(run_dir)
+    augment_market_maps_from_positions(price_map, name_map, before_positions_df)
 
     industry_map: Dict[str, str] = {}
     for item in proposal.get("new_portfolio", []):
         ticker = normalize_ticker(item.get("ticker", ""))
         industry_map[ticker] = str(item.get("industry", "未知"))
 
-    warnings: List[str] = []
+    warnings: List[str] = list(pre_warnings)
     new_rows: List[Dict[str, Any]] = []
 
     for t_raw, w_raw in sorted(target_weights.items()):
@@ -838,7 +909,7 @@ def _run_locked_execution(
 
     if not orders_path.exists():
         warnings.append(f"execution orders file not found: {orders_path}")
-        if not args.dry_run:
+        if not args.dry_run and not args.virtual:
             raise SystemExit(f"execution orders file not found: {orders_path}")
 
     artifact_prefix = "virtual_" if args.virtual else ""
@@ -947,6 +1018,7 @@ def _run_locked_execution(
         "executor": args.executor,
         "dry_run": args.dry_run,
         "virtual": bool(args.virtual),
+        "virtual_reset": bool(args.virtual_reset),
         "manual_fill_confirmed": bool(args.confirm_manual_fill),
         "account_path": str(account_path),
         "positions_path": str(positions_path),
@@ -1089,6 +1161,8 @@ def main() -> int:
     manual_only = safe_bool(cfg_execution.get("manual_only"), False)
     confirmation_required = safe_bool(cfg_execution.get("confirmation_required"), True)
 
+    if args.virtual_reset and not args.virtual:
+        raise SystemExit("--virtual-reset requires --virtual")
     if manual_only and not args.dry_run and not args.virtual:
         raise SystemExit("execution manual_only is enabled; only --dry-run is allowed")
     if confirmation_required and not args.dry_run and not args.confirm_manual_fill and not args.virtual:

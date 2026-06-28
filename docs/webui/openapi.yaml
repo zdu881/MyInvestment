@@ -1007,6 +1007,9 @@ components:
         virtual:
           type: boolean
           default: false
+        virtual_reset:
+          type: boolean
+          default: false
 
     SchedulerOnceRequest:
       type: object

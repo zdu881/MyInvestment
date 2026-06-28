@@ -40,6 +40,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run`
 - Virtual portfolio execution (mutates only the virtual ledger):
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --virtual`
+  - Does not consume the real execution queue; when no pending execution item exists, it simulates the proposal directly and records missing review/order evidence as warnings.
+  - Add `--virtual-reset` to reset the virtual ledger from its configured baseline before simulation.
 - Force execution when cost guard blocks (use carefully):
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force --confirm-manual-fill`
 - Generate operations health report:

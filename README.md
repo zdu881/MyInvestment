@@ -184,6 +184,7 @@ python3 agent_review.py --decision reject --run-id <RUN_ID> --reviewer your_name
 
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --virtual
+python3 agent_execute.py --run-id <RUN_ID> --executor your_name --virtual --virtual-reset
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --confirm-manual-fill
 python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force --confirm-manual-fill
 ```
@@ -191,7 +192,7 @@ python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force --confir
 如果你当前仅做手动交易，建议：
 - 保持 `agent_config.json` 的 `execution.manual_only=true`
 - 只运行 `agent_execute.py --dry-run` 用于生成执行前检查与成本评估
-- 需要验证策略落地效果时运行 `agent_execute.py --virtual`，它只更新 `state/virtual_positions.csv`、`state/virtual_account_snapshot.json` 和 `state/virtual_execution_history.jsonl`，不会消费真实执行队列
+- 需要验证策略落地效果时运行 `agent_execute.py --virtual`，它只更新 `state/virtual_positions.csv`、`state/virtual_account_snapshot.json` 和 `state/virtual_execution_history.jsonl`，不会消费真实执行队列；虚拟盘可直接按 `--run-id` 模拟 proposal，缺少审核或订单文件时会在结果 warnings 中标记；需要重新从真实持仓或初始现金开始时加 `--virtual-reset`
 - 按 `execution_orders.csv` 在券商端手动下单
 - 如关闭 `manual_only` 并需要把结果写回状态，必须在确认券商端成交后加 `--confirm-manual-fill`
 
