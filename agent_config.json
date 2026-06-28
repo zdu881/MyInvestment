@@ -66,6 +66,13 @@
     "confirmation_required": true,
     "manual_only": true
   },
+  "virtual_portfolio": {
+    "positions_path": "state/virtual_positions.csv",
+    "account_path": "state/virtual_account_snapshot.json",
+    "history_path": "state/virtual_execution_history.jsonl",
+    "initial_cash": 100000.0,
+    "initialize_from_real": true
+  },
   "maintenance": {
     "review_stale_hours": 24.0,
     "execution_stale_hours": 24.0,

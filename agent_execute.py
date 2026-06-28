@@ -26,6 +26,14 @@ DEFAULT_EXECUTION_SETTINGS = {
     "stamp_duty_sell_rate": 0.001,
 }
 
+DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS = {
+    "positions_path": "state/virtual_positions.csv",
+    "account_path": "state/virtual_account_snapshot.json",
+    "history_path": "state/virtual_execution_history.jsonl",
+    "initial_cash": 100000.0,
+    "initialize_from_real": True,
+}
+
 
 def now_local_iso(tz_hours: int = 8) -> str:
     now = datetime.now(timezone(timedelta(hours=tz_hours)))
@@ -309,6 +317,77 @@ def load_constraints(account: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, 
     }
 
 
+def resolve_config_path(root_dir: Path, raw_value: Any, default_value: str) -> Path:
+    value = Path(str(raw_value or default_value))
+    if not value.is_absolute():
+        value = (root_dir / value).resolve()
+    return value
+
+
+def resolve_virtual_portfolio_paths(
+    cfg: Dict[str, Any],
+    runtime_paths: RuntimePaths,
+) -> Tuple[Path, Path, Path, Dict[str, Any]]:
+    virtual_cfg = cfg.get("virtual_portfolio", {}) if isinstance(cfg.get("virtual_portfolio", {}), dict) else {}
+    merged = {**DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS, **virtual_cfg}
+    return (
+        resolve_config_path(runtime_paths.root_dir, merged.get("account_path"), DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS["account_path"]),
+        resolve_config_path(runtime_paths.root_dir, merged.get("positions_path"), DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS["positions_path"]),
+        resolve_config_path(runtime_paths.root_dir, merged.get("history_path"), DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS["history_path"]),
+        merged,
+    )
+
+
+def load_virtual_account(
+    virtual_account_path: Path,
+    real_account_path: Path,
+    virtual_cfg: Dict[str, Any],
+    executed_at: str,
+) -> Dict[str, Any]:
+    account = load_json(virtual_account_path)
+    if account:
+        return account
+
+    initialize_from_real = safe_bool(
+        virtual_cfg.get("initialize_from_real"),
+        DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS["initialize_from_real"],
+    )
+    if initialize_from_real:
+        account = load_json(real_account_path)
+    if not account:
+        initial_cash = safe_float(
+            virtual_cfg.get("initial_cash"),
+            DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS["initial_cash"],
+        )
+        account = {
+            "cash": initial_cash,
+            "stock_asset": 0.0,
+            "total_asset": initial_cash,
+            "cash_ratio": 1.0,
+        }
+
+    account = dict(account)
+    account["portfolio_type"] = "virtual"
+    account["virtual_initialized_at"] = executed_at
+    return account
+
+
+def load_virtual_positions_df(
+    virtual_positions_path: Path,
+    real_positions_path: Path,
+    virtual_cfg: Dict[str, Any],
+) -> pd.DataFrame:
+    if virtual_positions_path.exists():
+        return load_positions_df(virtual_positions_path)
+    initialize_from_real = safe_bool(
+        virtual_cfg.get("initialize_from_real"),
+        DEFAULT_VIRTUAL_PORTFOLIO_SETTINGS["initialize_from_real"],
+    )
+    if initialize_from_real:
+        return load_positions_df(real_positions_path)
+    return load_positions_df(virtual_positions_path)
+
+
 def validate_post_execution_constraints(
     positions_df: pd.DataFrame,
     cash_ratio: float,
@@ -365,6 +444,7 @@ def generate_portfolio_change_report(
     warnings: List[str],
     execution_costs: Dict[str, Any],
     constraint_validation: Dict[str, Any],
+    report_filename: str = "portfolio_change_report.md",
 ) -> Path:
     before_map = {
         normalize_ticker(r["ticker"]): safe_float(r.get("weight"), 0.0)
@@ -533,7 +613,7 @@ def generate_portfolio_change_report(
         for v in violations:
             lines.append(f"- violation: {v}")
 
-    report_path = run_dir / "portfolio_change_report.md"
+    report_path = run_dir / report_filename
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path
 
@@ -621,6 +701,11 @@ def parse_args() -> argparse.Namespace:
         help="confirm broker-side manual orders were filled before applying state changes",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--virtual",
+        action="store_true",
+        help="apply the approved task to the virtual portfolio ledger only",
+    )
     parser.add_argument("--lock-timeout-sec", type=float, default=10.0)
     return parser.parse_args()
 
@@ -682,11 +767,25 @@ def _run_locked_execution(
     if not isinstance(target_weights, dict):
         raise SystemExit("proposal target_weights malformed")
 
-    account_path = state_root / "account_snapshot.json"
-    positions_path = state_root / "current_positions.csv"
+    real_account_path = state_root / "account_snapshot.json"
+    real_positions_path = state_root / "current_positions.csv"
+    virtual_history_path: Optional[Path] = None
+    if args.virtual:
+        account_path, positions_path, virtual_history_path, virtual_cfg = resolve_virtual_portfolio_paths(
+            cfg, runtime_paths
+        )
+    else:
+        account_path = real_account_path
+        positions_path = real_positions_path
+        virtual_cfg = {}
 
-    account = load_json(account_path)
-    before_positions_df = load_positions_df(positions_path)
+    executed_at = now_local_iso(args.timezone_offset_hours)
+    if args.virtual:
+        account = load_virtual_account(account_path, real_account_path, virtual_cfg, executed_at)
+        before_positions_df = load_virtual_positions_df(positions_path, real_positions_path, virtual_cfg)
+    else:
+        account = load_json(account_path)
+        before_positions_df = load_positions_df(positions_path)
     total_asset = safe_float(account.get("total_asset"), 0.0)
     if total_asset <= 0:
         raise SystemExit("account total_asset must be > 0")
@@ -703,7 +802,6 @@ def _run_locked_execution(
 
     warnings: List[str] = []
     new_rows: List[Dict[str, Any]] = []
-    executed_at = now_local_iso(args.timezone_offset_hours)
 
     for t_raw, w_raw in sorted(target_weights.items()):
         ticker = normalize_ticker(t_raw)
@@ -743,8 +841,9 @@ def _run_locked_execution(
         if not args.dry_run:
             raise SystemExit(f"execution orders file not found: {orders_path}")
 
-    before_snapshot_path = run_dir / "portfolio_before_snapshot.csv"
-    after_snapshot_path = run_dir / "portfolio_after_snapshot.csv"
+    artifact_prefix = "virtual_" if args.virtual else ""
+    before_snapshot_path = run_dir / f"{artifact_prefix}portfolio_before_snapshot.csv"
+    after_snapshot_path = run_dir / f"{artifact_prefix}portfolio_after_snapshot.csv"
     before_positions_df.to_csv(before_snapshot_path, index=False, encoding="utf-8-sig")
     after_positions_df.to_csv(after_snapshot_path, index=False, encoding="utf-8-sig")
 
@@ -837,6 +936,7 @@ def _run_locked_execution(
         warnings=warnings,
         execution_costs=execution_costs,
         constraint_validation=constraint_validation,
+        report_filename=f"{artifact_prefix}portfolio_change_report.md",
     )
 
     execution_result = {
@@ -846,7 +946,10 @@ def _run_locked_execution(
         "queue_id": str(queue_item.get("queue_id", "")),
         "executor": args.executor,
         "dry_run": args.dry_run,
+        "virtual": bool(args.virtual),
         "manual_fill_confirmed": bool(args.confirm_manual_fill),
+        "account_path": str(account_path),
+        "positions_path": str(positions_path),
         "before_total_asset": round(total_asset, 4),
         "before_position_count": len(before_positions_df),
         "position_count": len(new_rows),
@@ -871,6 +974,8 @@ def _run_locked_execution(
         "warnings": warnings,
     }
 
+    result_path = run_dir / f"{artifact_prefix}execution_result.json"
+
     if not args.dry_run:
         cash_after_cost = projected_cash_after_cost
         total_asset_after_cost = projected_total_asset_after_cost
@@ -891,58 +996,77 @@ def _run_locked_execution(
             6,
         )
         account["last_execution_cost"] = round(total_execution_cost, 4)
+        if args.virtual:
+            account["portfolio_type"] = "virtual"
+            account["last_virtual_run_id"] = run_id
         account["updated_at"] = executed_at
         write_json(account_path, account)
 
-        queue_rows[queue_idx]["status"] = "executed"
-        queue_rows[queue_idx]["executed_at"] = executed_at
-        queue_rows[queue_idx]["executor"] = args.executor
-        write_jsonl_atomic(queue_path, queue_rows)
-
-        proposal["execution_status"] = "executed"
-        proposal["executed_at"] = executed_at
-        proposal["executed_by"] = args.executor
-        proposal["execution_warnings"] = warnings
-        proposal["execution_costs"] = execution_costs
-        proposal["constraint_validation"] = constraint_validation
-        write_json(proposal_path, proposal)
-
         execution_result["cash_after_cost"] = round(cash_after_cost, 4)
         execution_result["total_asset_after_cost"] = round(total_asset_after_cost, 4)
-        result_path = run_dir / "execution_result.json"
         write_json(result_path, execution_result)
-        append_jsonl(state_root / "execution_history.jsonl", execution_result)
-        append_jsonl(
-            decision_log_path,
-            {
-                "timestamp": executed_at,
-                "run_id": run_id,
-                "decision_id": proposal_id,
-                "executor": args.executor,
-                "final_action": "executed_rebalance",
-                "note": "execution applied to state",
-            },
-        )
-        append_jsonl(
-            run_dir / "decision_log.jsonl",
-            {
-                "timestamp": executed_at,
-                "run_id": run_id,
-                "decision_id": proposal_id,
-                "executor": args.executor,
-                "final_action": "executed_rebalance",
-                "note": "execution applied to state",
-            },
-        )
+
+        if args.virtual:
+            if virtual_history_path is not None:
+                append_jsonl(virtual_history_path, execution_result)
+            append_jsonl(run_dir / "virtual_execution_history.jsonl", execution_result)
+            append_jsonl(
+                run_dir / "decision_log.jsonl",
+                {
+                    "timestamp": executed_at,
+                    "run_id": run_id,
+                    "decision_id": proposal_id,
+                    "executor": args.executor,
+                    "final_action": "virtual_executed_rebalance",
+                    "note": "execution applied to virtual portfolio only",
+                },
+            )
+        else:
+            queue_rows[queue_idx]["status"] = "executed"
+            queue_rows[queue_idx]["executed_at"] = executed_at
+            queue_rows[queue_idx]["executor"] = args.executor
+            write_jsonl_atomic(queue_path, queue_rows)
+
+            proposal["execution_status"] = "executed"
+            proposal["executed_at"] = executed_at
+            proposal["executed_by"] = args.executor
+            proposal["execution_warnings"] = warnings
+            proposal["execution_costs"] = execution_costs
+            proposal["constraint_validation"] = constraint_validation
+            write_json(proposal_path, proposal)
+
+            append_jsonl(state_root / "execution_history.jsonl", execution_result)
+            append_jsonl(
+                decision_log_path,
+                {
+                    "timestamp": executed_at,
+                    "run_id": run_id,
+                    "decision_id": proposal_id,
+                    "executor": args.executor,
+                    "final_action": "executed_rebalance",
+                    "note": "execution applied to state",
+                },
+            )
+            append_jsonl(
+                run_dir / "decision_log.jsonl",
+                {
+                    "timestamp": executed_at,
+                    "run_id": run_id,
+                    "decision_id": proposal_id,
+                    "executor": args.executor,
+                    "final_action": "executed_rebalance",
+                    "note": "execution applied to state",
+                },
+            )
     else:
         execution_result["note"] = "dry-run only, state not changed"
-        result_path = run_dir / "execution_result.json"
         write_json(result_path, execution_result)
 
     print(f"[INFO] run_id={run_id}")
     print(f"[INFO] proposal_id={proposal_id}")
     print(f"[INFO] queue_id={queue_item.get('queue_id', '')}")
     print(f"[INFO] dry_run={args.dry_run}")
+    print(f"[INFO] virtual={args.virtual}")
     print(f"[INFO] position_count={len(new_rows)}")
     print(f"[INFO] cash_ratio={cash_ratio:.2%}")
     print(f"[INFO] report={report_path}")
@@ -965,9 +1089,9 @@ def main() -> int:
     manual_only = safe_bool(cfg_execution.get("manual_only"), False)
     confirmation_required = safe_bool(cfg_execution.get("confirmation_required"), True)
 
-    if manual_only and not args.dry_run:
+    if manual_only and not args.dry_run and not args.virtual:
         raise SystemExit("execution manual_only is enabled; only --dry-run is allowed")
-    if confirmation_required and not args.dry_run and not args.confirm_manual_fill:
+    if confirmation_required and not args.dry_run and not args.confirm_manual_fill and not args.virtual:
         raise SystemExit(
             "manual fill confirmation is required before applying execution state; "
             "use --confirm-manual-fill after broker orders are filled"

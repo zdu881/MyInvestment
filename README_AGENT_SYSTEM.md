@@ -38,6 +38,8 @@ This document describes the first build milestone of the daily investment agent 
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --confirm-manual-fill`
 - Execution dry-run (do not mutate state):
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --dry-run`
+- Virtual portfolio execution (mutates only the virtual ledger):
+  - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --virtual`
 - Force execution when cost guard blocks (use carefully):
   - `python3 agent_execute.py --run-id <RUN_ID> --executor your_name --force --confirm-manual-fill`
 - Generate operations health report:
