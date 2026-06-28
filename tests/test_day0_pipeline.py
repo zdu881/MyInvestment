@@ -394,6 +394,207 @@ def test_agent_execute_virtual_portfolio_applies_without_mutating_real_state(tmp
     assert not (run_dir / "execution_result.json").exists()
 
 
+def test_agent_execute_virtual_portfolio_can_simulate_unqueued_proposal(tmp_path: Path) -> None:
+    config_path = tmp_path / "agent_config.json"
+    _write_json(
+        config_path,
+        {
+            "paths": {
+                "runs_root": "runs",
+                "state_root": "state",
+            },
+            "constraints": {
+                "max_single_weight": 0.4,
+                "max_industry_weight": 0.8,
+                "min_cash_ratio": 0.1,
+            },
+            "execution": {
+                "manual_only": True,
+                "confirmation_required": True,
+                "max_cost_ratio_total_asset": 0.01,
+            },
+            "virtual_portfolio": {
+                "initialize_from_real": False,
+                "initial_cash": 50000.0,
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "state" / "account_snapshot.json",
+        {"cash": 12000.0, "stock_asset": 0.0, "total_asset": 12000.0, "cash_ratio": 1.0},
+    )
+    _write_csv(
+        tmp_path / "state" / "current_positions.csv",
+        fieldnames=["ticker", "name", "shares", "avg_cost", "last_price", "market_value", "weight", "industry", "updated_at"],
+        rows=[],
+    )
+
+    run_id = "virtual-unqueued-0001"
+    run_dir = tmp_path / "runs" / "2026-06-28" / run_id
+    _write_json(
+        run_dir / "allocation_proposal.json",
+        {
+            "run_id": run_id,
+            "decision_id": "proposal-unqueued-0001",
+            "target_weights": {"600941": 0.3, "601816": 0.2},
+            "new_portfolio": [
+                {"ticker": "600941", "industry": "通信"},
+                {"ticker": "601816", "industry": "交通运输"},
+            ],
+        },
+    )
+    _write_csv(
+        run_dir / "candidates_step2.csv",
+        fieldnames=["股票代码", "名称", "现价", "行业"],
+        rows=[
+            {"股票代码": "600941", "名称": "中国移动", "现价": "100.00", "行业": "通信"},
+            {"股票代码": "601816", "名称": "京沪高铁", "现价": "5.00", "行业": "交通运输"},
+        ],
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(EXEC_SCRIPT),
+            "--config",
+            str(config_path),
+            "--run-id",
+            run_id,
+            "--executor",
+            "virtual_tester",
+            "--virtual",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "queue_id=virtual:virtual-unqueued-0001" in proc.stdout
+    assert not (tmp_path / "state" / "execution_queue.jsonl").exists()
+
+    virtual_account = _read_json(tmp_path / "state" / "virtual_account_snapshot.json")
+    assert virtual_account["total_asset"] < 50000.0
+    assert virtual_account["stock_asset"] == 25000.0
+    assert virtual_account["cash"] < 25000.0
+
+    result = _read_json(run_dir / "virtual_execution_result.json")
+    assert result["proposal_id"] == "proposal-unqueued-0001"
+    assert result["queue_id"] == "virtual:virtual-unqueued-0001"
+    assert result["virtual"] is True
+    assert any("without pending execution queue item" in item for item in result["warnings"])
+    assert any("without review decision" in item for item in result["warnings"])
+    assert any("execution orders file not found" in item for item in result["warnings"])
+
+
+def test_agent_execute_virtual_portfolio_uses_position_price_when_run_price_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "agent_config.json"
+    _write_json(
+        config_path,
+        {
+            "paths": {
+                "runs_root": "runs",
+                "state_root": "state",
+            },
+            "constraints": {
+                "max_single_weight": 0.4,
+                "max_industry_weight": 0.8,
+                "min_cash_ratio": 0.1,
+            },
+            "execution": {
+                "manual_only": True,
+                "confirmation_required": True,
+                "max_cost_ratio_total_asset": 0.01,
+            },
+            "virtual_portfolio": {
+                "initialize_from_real": True,
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "state" / "account_snapshot.json",
+        {"cash": 14114.05, "stock_asset": 9639.0, "total_asset": 23753.05, "cash_ratio": 0.594199},
+    )
+    _write_csv(
+        tmp_path / "state" / "current_positions.csv",
+        fieldnames=["ticker", "name", "shares", "avg_cost", "last_price", "market_value", "weight", "industry", "updated_at"],
+        rows=[
+            {
+                "ticker": "601816",
+                "name": "京沪高铁",
+                "shares": "2100",
+                "avg_cost": "4.952",
+                "last_price": "4.59",
+                "market_value": "9639.00",
+                "weight": "0.405801",
+                "industry": "交通运输",
+                "updated_at": "2026-06-23T15:00:00+08:00",
+            },
+        ],
+    )
+    _write_json(
+        tmp_path / "state" / "virtual_account_snapshot.json",
+        {"cash": 10.0, "stock_asset": 10.0, "total_asset": 20.0, "cash_ratio": 0.5},
+    )
+    _write_csv(
+        tmp_path / "state" / "virtual_positions.csv",
+        fieldnames=["ticker", "name", "shares", "avg_cost", "last_price", "market_value", "weight", "industry", "updated_at"],
+        rows=[
+            {
+                "ticker": "601816",
+                "name": "N/A",
+                "shares": "10",
+                "avg_cost": "1.0",
+                "last_price": "1.0",
+                "market_value": "10.0",
+                "weight": "0.5",
+                "industry": "交通运输",
+                "updated_at": "2026-06-20T15:00:00+08:00",
+            },
+        ],
+    )
+
+    run_id = "virtual-price-fallback-0001"
+    run_dir = tmp_path / "runs" / "2026-06-28" / run_id
+    _write_json(
+        run_dir / "allocation_proposal.json",
+        {
+            "run_id": run_id,
+            "decision_id": "proposal-price-fallback-0001",
+            "target_weights": {"601816": 0.3},
+            "new_portfolio": [{"ticker": "601816", "industry": "交通运输"}],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(EXEC_SCRIPT),
+            "--config",
+            str(config_path),
+            "--run-id",
+            run_id,
+            "--executor",
+            "virtual_tester",
+            "--virtual",
+            "--virtual-reset",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    virtual_positions = _read_csv(tmp_path / "state" / "virtual_positions.csv")
+    assert virtual_positions[0]["ticker"] == "601816"
+    assert virtual_positions[0]["name"] == "京沪高铁"
+    assert virtual_positions[0]["last_price"] == "4.59"
+    assert virtual_positions[0]["shares"] == "1552.4869"
+    result = _read_json(run_dir / "virtual_execution_result.json")
+    assert result["virtual_reset"] is True
+    assert not any("missing price for 601816" in item for item in result["warnings"])
+
+
 def test_postclose_degrades_to_current_positions_when_refresh_fails(tmp_path: Path) -> None:
     config_path = tmp_path / "agent_config.json"
     _write_json(

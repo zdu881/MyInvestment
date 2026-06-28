@@ -661,6 +661,7 @@ def test_build_execute_command_supports_virtual_portfolio() -> None:
             force=True,
             confirm_manual_fill=False,
             virtual=True,
+            virtual_reset=True,
         ),
     )
 
@@ -670,6 +671,7 @@ def test_build_execute_command_supports_virtual_portfolio() -> None:
     assert "--executor tester" in command_text
     assert "--force" in command
     assert "--virtual" in command
+    assert "--virtual-reset" in command
     assert "--confirm-manual-fill" not in command
 
 
